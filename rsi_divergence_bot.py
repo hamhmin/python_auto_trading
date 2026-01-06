@@ -26,7 +26,7 @@ LEVERAGE = 20
 POSITION_SIZE = 0.002  # BTC 수량
 
 # 전략 파라미터
-RSI_PERIOD = 14
+RSI_PERIOD = 38
 LOOKBACK_LEFT = 5
 LOOKBACK_RIGHT = 1
 RANGE_LOWER = 5
@@ -41,8 +41,8 @@ PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
 MAX_POSITIONS = 3  # 최대 동시 포지션 수
 
 # 리스크 관리
-STOP_LOSS_BEAR = 2.5  # Bearish 스탑로스 (%)
-STOP_LOSS_BULL = 1.0  # Bullish 스탑로스 (%)
+STOP_LOSS_BEAR = 2.1  # Bearish 스탑로스 (%)
+STOP_LOSS_BULL = 2.1  # Bullish 스탑로스 (%)
 
 # 데이터 설정
 CANDLES_TO_LOAD = 100  # 최소 60개 이상 필요
@@ -247,26 +247,28 @@ def find_pivot_low(series, left, right, idx):
     return left_higher and right_higher
 
 def detect_regular_divergence(df):
-    """Regular Divergence 감지 (현재 봉에서 확정된 신호만)"""
+    """Regular Divergence 감지"""
     signals = []
-    current_idx = len(df) - 1
     
-    # Bearish Divergence 체크
-    for i in range(len(df) - LOOKBACK_RIGHT - 1, len(df) - LOOKBACK_RIGHT):
-        if find_pivot_high(df['rsi'], LOOKBACK_LEFT, LOOKBACK_RIGHT, i):
-            # 이전 피벗 찾기
-            for j in range(i - RANGE_LOWER, max(i - RANGE_UPPER, 0), -1):
-                if find_pivot_high(df['rsi'], LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
+    rsi = df['rsi']
+    high = df['high']
+    low = df['low']
+    
+    # 현재 확정된 봉까지만 검사 (마지막 봉 제외)
+    end_idx = len(df) - LOOKBACK_RIGHT - 1
+    
+    for i in range(LOOKBACK_LEFT, end_idx):
+        # Bearish Divergence
+        if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, i):
+            for j in range(i - RANGE_LOWER, max(i - RANGE_UPPER, LOOKBACK_LEFT), -1):
+                if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
                     signal_idx = i + LOOKBACK_RIGHT
-                    
-                    # 신호가 현재 봉인지 확인
-                    if signal_idx == current_idx:
-                        rsi_curr = df['rsi'].iloc[i]
-                        rsi_prev = df['rsi'].iloc[j]
-                        price_curr = df['high'].iloc[i]
-                        price_prev = df['high'].iloc[j]
+                    if signal_idx < len(df):
+                        rsi_curr = rsi.iloc[i]
+                        rsi_prev = rsi.iloc[j]
+                        price_curr = high.iloc[i]
+                        price_prev = high.iloc[j]
                         
-                        # Regular Bearish: RSI LH + Price HH
                         if rsi_curr < rsi_prev and price_curr > price_prev:
                             signals.append({
                                 'type': 'bearish',
@@ -279,23 +281,18 @@ def detect_regular_divergence(df):
                             # 텔레그램 알림
                             send_divergence_alert('bearish', df['close'].iloc[signal_idx], rsi_curr)
                     break
-    
-    # Bullish Divergence 체크
-    for i in range(len(df) - LOOKBACK_RIGHT - 1, len(df) - LOOKBACK_RIGHT):
-        if find_pivot_low(df['rsi'], LOOKBACK_LEFT, LOOKBACK_RIGHT, i):
-            # 이전 피벗 찾기
-            for j in range(i - RANGE_LOWER, max(i - RANGE_UPPER, 0), -1):
-                if find_pivot_low(df['rsi'], LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
+        
+        # Bullish Divergence
+        if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, i):
+            for j in range(i - RANGE_LOWER, max(i - RANGE_UPPER, LOOKBACK_LEFT), -1):
+                if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
                     signal_idx = i + LOOKBACK_RIGHT
-                    
-                    # 신호가 현재 봉인지 확인
-                    if signal_idx == current_idx:
-                        rsi_curr = df['rsi'].iloc[i]
-                        rsi_prev = df['rsi'].iloc[j]
-                        price_curr = df['low'].iloc[i]
-                        price_prev = df['low'].iloc[j]
+                    if signal_idx < len(df):
+                        rsi_curr = rsi.iloc[i]
+                        rsi_prev = rsi.iloc[j]
+                        price_curr = low.iloc[i]
+                        price_prev = low.iloc[j]
                         
-                        # Regular Bullish: RSI HL + Price LL
                         if rsi_curr > rsi_prev and price_curr < price_prev:
                             signals.append({
                                 'type': 'bullish',
@@ -312,11 +309,11 @@ def detect_regular_divergence(df):
     return signals
 
 # ============================================================================
-# 주문 실행 함수
+# 주문 실행 함수 - 🔧 수정됨
 # ============================================================================
 
 def execute_entry(signal_type, amount=POSITION_SIZE):
-    """진입 주문 실행"""
+    """진입 주문 실행 - division by zero 방지"""
     try:
         # 1. 마진 모드 설정 (ISOLATED)
         try:
@@ -340,8 +337,37 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
             quantity=amount
         )
         
-        entry_price = float(order['avgPrice'])
-        log(f"✅ {'숏' if signal_type == 'bearish' else '롱'} 진입 성공! 가격: {entry_price}, 수량: {amount}")
+        # 🔧 진입 가격 가져오기 (여러 방법 시도)
+        entry_price = 0.0
+        
+        # 방법 1: avgPrice 사용
+        if 'avgPrice' in order and order['avgPrice']:
+            entry_price = float(order['avgPrice'])
+        
+        # 방법 2: avgPrice가 없으면 fills 사용
+        elif 'fills' in order and order['fills']:
+            total_qty = 0
+            total_cost = 0
+            for fill in order['fills']:
+                qty = float(fill['qty'])
+                price = float(fill['price'])
+                total_qty += qty
+                total_cost += qty * price
+            if total_qty > 0:
+                entry_price = total_cost / total_qty
+        
+        # 방법 3: 둘 다 없으면 현재 시장가 사용
+        if entry_price == 0.0:
+            ticker = client.futures_symbol_ticker(symbol=SYMBOL)
+            entry_price = float(ticker['price'])
+            log(f"⚠️ 주문 응답에 가격 없음, 현재 시장가 사용: {entry_price}")
+        
+        # 🔧 가격 유효성 검증
+        if entry_price <= 0:
+            log(f"❌ 진입 가격이 유효하지 않음: {entry_price}")
+            return None
+        
+        log(f"✅ {'숏' if signal_type == 'bearish' else '롱'} 진입 성공! 가격: {entry_price:,.2f}, 수량: {amount}")
         
         position = {
             'order_id': order['orderId'],
@@ -362,10 +388,15 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
         return None
 
 def set_stop_loss(position):
-    """스탑로스 설정"""
+    """스탑로스 설정 - 가격 유효성 검증 추가"""
     try:
         entry_price = position['entry_price']
         signal_type = position['type']
+        
+        # 🔧 진입 가격 유효성 검증
+        if entry_price <= 0:
+            log(f"❌ 진입 가격이 유효하지 않아 스탑로스 설정 불가: {entry_price}")
+            return None
         
         # 스탑로스 가격 계산
         if signal_type == 'bearish':
@@ -376,6 +407,11 @@ def set_stop_loss(position):
             # 롱: 진입가보다 아래
             stop_price = entry_price * (1 - STOP_LOSS_BULL / 100)
             side = SIDE_SELL  # 롱 청산 = 매도
+        
+        # 🔧 스탑 가격 유효성 검증
+        if stop_price <= 0:
+            log(f"❌ 스탑로스 가격이 음수: {stop_price}")
+            return None
         
         # 스탑로스 주문
         stop_order = client.futures_create_order(
@@ -451,9 +487,14 @@ def get_current_price():
         return None
 
 def calculate_profit(position, current_price):
-    """현재 수익률 계산 (종가 기준)"""
+    """현재 수익률 계산 (종가 기준) - division by zero 방지"""
     entry_price = position['entry_price']
     signal_type = position['type']
+    
+    # 🔧 division by zero 방지
+    if entry_price <= 0:
+        log(f"⚠️ 진입 가격이 0이어서 수익률 계산 불가")
+        return 0.0
     
     if signal_type == 'bearish':
         # 숏: 가격 하락이 이익
@@ -479,12 +520,17 @@ def get_current_candle():
         return None
 
 def calculate_max_profit_in_candle(position, candle):
-    """현재 봉에서 도달 가능한 최대 수익률 계산 (고가/저가 기준)"""
+    """현재 봉에서 도달 가능한 최대 수익률 계산 (고가/저가 기준) - division by zero 방지"""
     if candle is None:
         return 0
     
     entry_price = position['entry_price']
     signal_type = position['type']
+    
+    # 🔧 division by zero 방지
+    if entry_price <= 0:
+        log(f"⚠️ 진입 가격이 0이어서 최대 수익률 계산 불가")
+        return 0.0
     
     if signal_type == 'bearish':
         # 숏: 저가에서 최대 이익
@@ -496,7 +542,7 @@ def calculate_max_profit_in_candle(position, candle):
     return max_profit
 
 # ============================================================================
-# 메인 봇 로직
+# 메인 봇 로직 - 🔧 신호 중복 방지 추가
 # ============================================================================
 
 def main():
@@ -514,6 +560,8 @@ def main():
     
     # 포지션 추적
     active_positions = {}
+    # 🔧 진입한 신호 인덱스 기록 (중복 방지)
+    entered_signals = set()
     
     while True:
         try:
@@ -536,30 +584,39 @@ def main():
             current_rsi = df['rsi'].iloc[-1]
             log(f"현재 가격: ${current_price:,.2f}, RSI: {current_rsi:.2f}")
             
-            # 3. 다이버전스 신호 감지 (현재 봉에서 확정된 것만)
-            # 다중 포지션 허용 (최대 3개)
-            MAX_POSITIONS = 3
-            
+            # 3. 다이버전스 신호 감지
             if len(active_positions) < MAX_POSITIONS:
                 signals = detect_regular_divergence(df)
                 
                 if signals:
-                    signal = signals[0]  # 첫 번째 신호만 사용
-                    
-                    # 진입
-                    position = execute_entry(signal['type'], POSITION_SIZE)
-                    
-                    if position:
-                        # 스탑로스 설정
-                        stop_order_id = set_stop_loss(position)
+                    for signal in signals:
+                        signal_index = signal['index']
                         
-                        # 포지션 기록
-                        position['stop_order_id'] = stop_order_id
-                        position['partial_closed'] = False
+                        # 🔧 이미 진입한 신호는 건너뛰기
+                        if signal_index in entered_signals:
+                            log(f"⚠️ 신호 #{signal_index}는 이미 진입함, 건너뜀")
+                            continue
                         
-                        active_positions[position['order_id']] = position
+                        # 진입
+                        position = execute_entry(signal['type'], POSITION_SIZE)
                         
-                        log(f"✅ 포지션 오픈 완료: {signal['type'].upper()} (총 {len(active_positions)}개)")
+                        if position:
+                            # 스탑로스 설정
+                            stop_order_id = set_stop_loss(position)
+                            
+                            # 포지션 기록
+                            position['stop_order_id'] = stop_order_id
+                            position['partial_closed'] = False
+                            position['signal_index'] = signal_index  # 신호 인덱스 저장
+                            
+                            active_positions[position['order_id']] = position
+                            entered_signals.add(signal_index)  # 진입한 신호 기록
+                            
+                            log(f"✅ 포지션 오픈 완료: {signal['type'].upper()} (총 {len(active_positions)}개)")
+                            
+                            # 최대 포지션 도달 시 중단
+                            if len(active_positions) >= MAX_POSITIONS:
+                                break
                 else:
                     if len(active_positions) == 0:
                         log("📭 신호 없음")
@@ -633,6 +690,9 @@ def main():
                         
                         # 포지션 제거
                         del active_positions[pos_id]
+                        # 🔧 진입 신호도 제거 (나중에 다시 진입 가능하도록)
+                        if 'signal_index' in position:
+                            entered_signals.discard(position['signal_index'])
             
             # 5. 다음 봉까지 대기
             current_time = datetime.now()
@@ -644,7 +704,9 @@ def main():
             break
             
         except Exception as e:
+            import traceback
             log(f"❌ 오류 발생: {e}")
+            log(f"📋 상세 오류:\n{traceback.format_exc()}")
             log("⏳ 60초 후 재시도...")
             time.sleep(60)
 
