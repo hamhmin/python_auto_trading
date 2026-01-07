@@ -1,4 +1,4 @@
 .env
 
-.csv
-.txt
+*.csv
+*.txt

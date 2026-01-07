@@ -26,15 +26,15 @@ LEVERAGE = 25
 POSITION_SIZE = 25  # XRP 수량
 
 # 전략 파라미터
-RSI_PERIOD = 18
+RSI_PERIOD = 14
 LOOKBACK_LEFT = 5
 LOOKBACK_RIGHT = 1
 RANGE_LOWER = 5
 RANGE_UPPER = 60
 
 # 청산 설정
-HOLD_BARS = 15  # 15봉 = 225분 = 3.75시간
-PARTIAL_PROFIT_TARGET = 0.8  # 0.4% 도달 시
+HOLD_BARS = 18  # 15봉 = 225분 = 3.75시간
+PARTIAL_PROFIT_TARGET = 0.8  # 0.8% 도달 시
 PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
 
 # 포지션 관리
@@ -45,7 +45,7 @@ STOP_LOSS_BEAR = 0.8  # Bearish 스탑로스 (%)
 STOP_LOSS_BULL = 0.8  # Bullish 스탑로스 (%)
 
 # 데이터 설정
-CANDLES_TO_LOAD = 150  # RSI 계산 후 dropna를 고려하여 여유있게 설정
+CANDLES_TO_LOAD = 1500  # RSI 계산 후 dropna를 고려하여 여유있게 설정
 
 # ============================================================================
 # 텔레그램 알림 함수
@@ -177,6 +177,61 @@ def send_stop_loss_alert(position):
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 ⚠️ 손실 제한으로 포지션 종료
+"""
+    send_telegram_message(message)
+
+def send_positions_status(active_positions):
+    """현재 포지션 상태 전송"""
+    if not active_positions:
+        message = """
+📊 <b>현재 포지션 현황</b>
+
+포지션이 없습니다.
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+""".replace("{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", 
+            datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        send_telegram_message(message)
+        return
+    
+    message = f"""
+📊 <b>현재 포지션 현황</b>
+
+총 {len(active_positions)}개 포지션 보유
+
+"""
+    
+    for pos_id, pos in active_positions.items():
+        type_kr = "숏(SHORT)" if pos['type'] == 'bearish' else "롱(LONG)"
+        partial_status = "✅ 완료" if pos['partial_closed'] else "❌ 미완료"
+        
+        # 보유 시간 계산
+        time_held = datetime.now() - pos['entry_time']
+        hours = time_held.total_seconds() / 3600
+        bars_held = int(time_held.total_seconds() / 900)  # 15분 = 900초
+        
+        # 현재 수익률 계산
+        current_price = get_current_price()
+        if current_price:
+            profit = calculate_profit(pos, current_price)
+            profit_text = f"{profit:+.2f}%"
+        else:
+            profit_text = "계산 불가"
+        
+        message += f"""
+━━━━━━━━━━━━━━━━━━━━
+🔖 포지션 ID: {pos['position_id']}
+📊 방향: {type_kr}
+💰 진입가: ${pos['entry_price']:,.2f}
+📦 현재 수량: {pos['amount']:.4f} XRP
+💎 부분 익절: {partial_status}
+📈 수익률: {profit_text}
+⏱️ 보유: {bars_held}봉 ({hours:.1f}시간)
+
+"""
+    
+    message += f"""
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
     send_telegram_message(message)
 
@@ -433,19 +488,27 @@ def set_stop_loss(position):
         return None
 
 def execute_partial_close(position, ratio=0.5):
-    """부분 청산"""
+    """부분 청산 - 정확한 수량 계산"""
     try:
-        amount = position['amount'] * ratio
+        # 🔧 현재 포지션의 정확한 수량으로 계산
+        close_amount = position['amount'] * ratio
+        
+        # 🔧 소수점 처리 (바이낸스 최소 단위에 맞춤)
+        close_amount = round(close_amount, 3)
+        
         side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
+        
+        log(f"💰 부분 익절 시도: 전체 {position['amount']:.4f} XRP 중 {close_amount:.4f} XRP 청산")
         
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type=ORDER_TYPE_MARKET,
-            quantity=amount
+            quantity=close_amount,
+            reduceOnly=True
         )
         
-        log(f"💰 부분 익절 ({ratio*100}%) 성공! 수량: {amount}")
+        log(f"✅ 부분 익절 ({ratio*100}%) 성공! 청산: {close_amount:.4f} XRP")
         return order
         
     except Exception as e:
@@ -453,19 +516,27 @@ def execute_partial_close(position, ratio=0.5):
         return None
 
 def execute_full_close(position):
-    """전체 청산"""
+    """전체 청산 - 남은 수량만 청산"""
     try:
+        # 🔧 현재 포지션에 남아있는 정확한 수량
+        close_amount = position['amount']
+        
+        # 🔧 소수점 처리
+        close_amount = round(close_amount, 3)
+        
         side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
+        
+        log(f"🏁 전체 청산 시도: {close_amount:.4f} XRP")
         
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type=ORDER_TYPE_MARKET,
-            quantity=position['amount'],
+            quantity=close_amount,
             reduceOnly=True
         )
         
-        log(f"🏁 전체 청산 성공! 수량: {position['amount']}")
+        log(f"✅ 전체 청산 성공! 수량: {close_amount:.4f} XRP")
         return order
         
     except Exception as e:
@@ -613,26 +684,37 @@ def main():
                             log(f"⚠️ 신호 #{signal_index}는 이미 진입함, 건너뜀")
                             continue
                         
-                        # 진입
+                        # 진입 시도
                         position = execute_entry(signal['type'], POSITION_SIZE)
                         
                         if position:
+                            # 진입 성공
+                            # 🔧 포지션 ID 생성
+                            position_id = get_next_position_id()
+                            
                             # 스탑로스 설정
                             stop_order_id = set_stop_loss(position)
                             
                             # 포지션 기록
+                            position['position_id'] = position_id  # 내부 추적 ID
                             position['stop_order_id'] = stop_order_id
                             position['partial_closed'] = False
-                            position['signal_index'] = signal_index  # 신호 인덱스 저장
+                            position['signal_index'] = signal_index
+                            position['initial_amount'] = POSITION_SIZE  # 초기 진입 수량 기록
                             
-                            active_positions[position['order_id']] = position
-                            entered_signals.add(signal_index)  # 진입한 신호 기록
+                            active_positions[position_id] = position  # 🔧 position_id를 키로 사용
+                            entered_signals.add(signal_index)
                             
-                            log(f"✅ 포지션 오픈 완료: {signal['type'].upper()} (총 {len(active_positions)}개)")
+                            log(f"✅ 포지션 오픈 완료: ID={position_id}, {signal['type'].upper()}, 수량={POSITION_SIZE} XRP (총 {len(active_positions)}개)")
                             
                             # 최대 포지션 도달 시 중단
                             if len(active_positions) >= MAX_POSITIONS:
                                 break
+                        else:
+                            # 🔧 진입 실패 (잔고 부족 등)
+                            # 신호는 기록하되 포지션은 열지 않음
+                            entered_signals.add(signal_index)
+                            log(f"⚠️ 진입 실패했지만 신호 #{signal_index} 기록 (중복 방지)")
                 else:
                     if len(active_positions) == 0:
                         log("📭 신호 없음")
@@ -662,32 +744,36 @@ def main():
                 minutes_held = time_held.total_seconds() / 60
                 bars_held = int(minutes_held / 15)  # 15분 = 1봉
                 
-                log(f"📍 포지션 #{pos_id}: {position['type'].upper()}, "
+                log(f"📍 포지션 ID={pos_id}: {position['type'].upper()}, "
                     f"진입가: ${position['entry_price']:,.2f}, "
                     f"현재: ${current_price:,.2f}, "
+                    f"현재수량: {position['amount']:.4f} XRP, "
                     f"수익(종가): {profit:+.2f}%, "
                     f"최대수익(봉내): {max_profit_in_candle:+.2f}%, "
                     f"보유: {bars_held}봉 ({minutes_held:.0f}분)")
                 
                 # 부분 익절 체크 (고가/저가 기준으로 0.4% 도달 확인)
                 if not position['partial_closed'] and max_profit_in_candle >= PARTIAL_PROFIT_TARGET:
-                    log(f"🎯 부분 익절 조건 달성! (최대 {max_profit_in_candle:.2f}% >= {PARTIAL_PROFIT_TARGET}%)")
+                    log(f"🎯 포지션 ID={pos_id} 부분 익절 조건 달성! (최대 {max_profit_in_candle:.2f}% >= {PARTIAL_PROFIT_TARGET}%)")
                     
                     result = execute_partial_close(position, PARTIAL_PROFIT_RATIO)
                     
                     if result:
+                        # 🔧 남은 수량 정확히 계산
+                        closed_amount = position['amount'] * PARTIAL_PROFIT_RATIO
+                        position['amount'] = position['amount'] - closed_amount
                         position['partial_closed'] = True
-                        position['amount'] *= (1 - PARTIAL_PROFIT_RATIO)  # 남은 수량 업데이트
-                        log(f"✅ 부분 익절 완료, 남은 수량: {position['amount']}")
+                        
+                        log(f"✅ 포지션 ID={pos_id} 부분 익절 완료, 남은 수량: {position['amount']:.4f} XRP")
                         
                         # 텔레그램 알림
                         send_partial_close_alert(position, max_profit_in_candle)
                 
                 # 15봉 도달 체크 (실제 시간 기준)
                 if bars_held >= HOLD_BARS:
-                    log(f"⏰ {HOLD_BARS}봉 도달! ({minutes_held:.0f}분 경과) 전체 청산 실행")
+                    log(f"⏰ 포지션 ID={pos_id} {HOLD_BARS}봉 도달! ({minutes_held:.0f}분 경과) 전체 청산 실행")
                     
-                    # 전체 청산
+                    # 전체 청산 (남은 수량만)
                     result = execute_full_close(position)
                     
                     if result:
@@ -699,19 +785,24 @@ def main():
                         final_price = get_current_price()
                         final_profit = calculate_profit(position, final_price)
                         
-                        log(f"🏁 포지션 종료: 최종 수익률 {final_profit:+.2f}%")
+                        log(f"🏁 포지션 ID={pos_id} 종료: 최종 수익률 {final_profit:+.2f}%")
                         
                         # 텔레그램 알림
                         send_final_close_alert(position, final_profit, final_price)
                         
                         # 포지션 제거
                         del active_positions[pos_id]
-                        # 🔧 진입 신호도 제거 (나중에 다시 진입 가능하도록)
+                        # 진입 신호도 제거 (나중에 다시 진입 가능하도록)
                         if 'signal_index' in position:
                             entered_signals.discard(position['signal_index'])
             
             # 5. 다음 봉까지 대기
             current_time = datetime.now()
+            
+            # 🔧 매 시간마다 포지션 상태 전송 (예: 매시 00분)
+            if active_positions and current_time.minute == 0:
+                send_positions_status(active_positions)
+            
             log(f"\n⏳ 다음 봉까지 대기 중... (15분) - 현재: {current_time.strftime('%H:%M:%S')}")
             time.sleep(900)  # 15분 = 900초
             
