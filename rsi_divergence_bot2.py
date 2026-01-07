@@ -20,13 +20,13 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 # 설정값
 # ============================================================================
 
-SYMBOL = "BTCUSDT"
+SYMBOL = "XRPUSDT"
 TIMEFRAME = "15m"
 LEVERAGE = 25
-POSITION_SIZE = 0.001  # BTC 수량
+POSITION_SIZE = 25  # XRP 수량
 
 # 전략 파라미터
-RSI_PERIOD = 38
+RSI_PERIOD = 18
 LOOKBACK_LEFT = 5
 LOOKBACK_RIGHT = 1
 RANGE_LOWER = 5
@@ -34,15 +34,15 @@ RANGE_UPPER = 60
 
 # 청산 설정
 HOLD_BARS = 15  # 15봉 = 225분 = 3.75시간
-PARTIAL_PROFIT_TARGET = 0.4  # 0.4% 도달 시
+PARTIAL_PROFIT_TARGET = 0.8  # 0.4% 도달 시
 PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
 
 # 포지션 관리
 MAX_POSITIONS = 3  # 최대 동시 포지션 수
 
 # 리스크 관리
-STOP_LOSS_BEAR = 2.1  # Bearish 스탑로스 (%)
-STOP_LOSS_BULL = 2.1  # Bullish 스탑로스 (%)
+STOP_LOSS_BEAR = 0.8  # Bearish 스탑로스 (%)
+STOP_LOSS_BULL = 0.8  # Bullish 스탑로스 (%)
 
 # 데이터 설정
 CANDLES_TO_LOAD = 150  # RSI 계산 후 dropna를 고려하여 여유있게 설정
@@ -109,7 +109,7 @@ def send_entry_alert(position):
 
 📊 방향: {type_kr}
 💰 진입가: ${position['entry_price']:,.2f}
-📦 수량: {position['amount']} BTC
+📦 수량: {position['amount']} XRP
 🔢 레버리지: {LEVERAGE}배
 🛡️ 스탑로스: {stop_loss}%
 
@@ -554,7 +554,7 @@ def main():
     log(f"심볼: {SYMBOL}")
     log(f"타임프레임: {TIMEFRAME}")
     log(f"레버리지: {LEVERAGE}배")
-    log(f"포지션 크기: {POSITION_SIZE} BTC")
+    log(f"포지션 크기: {POSITION_SIZE} XRP")
     log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% 도달 시 {PARTIAL_PROFIT_RATIO*100}%")
     log(f"보유 기간: {HOLD_BARS}봉 (225분)")
     log(f"스탑로스: Bear {STOP_LOSS_BEAR}%, Bull {STOP_LOSS_BULL}%")
