@@ -3,7 +3,7 @@ import time
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.enums import *
@@ -15,6 +15,16 @@ client = Client(os.getenv('API_KEY'), os.getenv('SECRET_KEY'))
 # 텔레그램 설정
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
+# 포지션 ID 카운터
+POSITION_COUNTER = 0
+
+def get_next_position_id():
+    """포지션 ID 생성"""
+    global POSITION_COUNTER
+    POSITION_COUNTER += 1
+    return POSITION_COUNTER
+
 
 # ============================================================================
 # 설정값
@@ -45,7 +55,7 @@ STOP_LOSS_BEAR = 2.1  # Bearish 스탑로스 (%)
 STOP_LOSS_BULL = 2.1  # Bullish 스탑로스 (%)
 
 # 데이터 설정
-CANDLES_TO_LOAD = 1500  # RSI 계산 후 dropna를 고려하여 여유있게 설정
+CANDLES_TO_LOAD = 300  # RSI 계산 후 dropna를 고려하여 여유있게 설정
 
 # ============================================================================
 # 텔레그램 알림 함수
@@ -95,14 +105,14 @@ def send_divergence_alert(signal_type, current_price, current_rsi):
 
 def send_entry_alert(position):
     """진입 체결 알림"""
-    from datetime import timedelta
-    
     emoji = "🔴" if position['type'] == "bearish" else "🟢"
     type_kr = "숏(SHORT)" if position['type'] == "bearish" else "롱(LONG)"
     stop_loss = STOP_LOSS_BEAR if position['type'] == "bearish" else STOP_LOSS_BULL
     
-    # 예상 종료 시간 계산 (15봉 = 225분)
-    expected_close_time = position['entry_time'] + timedelta(minutes=HOLD_BARS * 15)
+    # 예상 종료 시간 계산
+    hold_minutes = HOLD_BARS * 15
+    hold_hours = hold_minutes / 60
+    expected_close_time = position['entry_time'] + timedelta(minutes=hold_minutes)
     
     message = f"""
 {emoji} <b>포지션 진입 완료!</b>
@@ -117,24 +127,27 @@ def send_entry_alert(position):
 ⏰ 예상 종료: {expected_close_time.strftime('%Y-%m-%d %H:%M:%S')} ({HOLD_BARS}봉 후)
 
 📌 목표:
-  • 부분 익절: 0.4% 도달 시 50%
-  • 전체 청산: 15봉 후 (약 3.75시간)
+  • 부분 익절: {PARTIAL_PROFIT_TARGET}% 도달 시 {PARTIAL_PROFIT_RATIO*100:.0f}%
+  • 전체 청산: {HOLD_BARS}봉 후 (약 {hold_hours:.1f}시간)
 """
     send_telegram_message(message)
 
 def send_partial_close_alert(position, profit):
     """부분 익절 알림"""
+    hold_minutes = HOLD_BARS * 15
+    hold_hours = hold_minutes / 60
+    
     message = f"""
 💰 <b>부분 익절 체결!</b>
 
 📊 포지션: {'숏' if position['type'] == 'bearish' else '롱'}
-✅ 익절 비율: 50%
+✅ 익절 비율: {PARTIAL_PROFIT_RATIO*100:.0f}%
 📈 현재 수익률: {profit:+.2f}%
 💵 진입가: ${position['entry_price']:,.2f}
 
 ⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
-🔄 남은 50%는 15봉까지 보유 예정
+🔄 남은 {(1-PARTIAL_PROFIT_RATIO)*100:.0f}%는 {HOLD_BARS}봉까지 보유 예정 (약 {hold_hours:.1f}시간)
 """
     send_telegram_message(message)
 
@@ -445,47 +458,9 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
         return None
 
 def set_stop_loss(position):
-    """스탑로스 설정 - 가격 유효성 검증 추가"""
-    try:
-        entry_price = position['entry_price']
-        signal_type = position['type']
-        
-        # 🔧 진입 가격 유효성 검증
-        if entry_price <= 0:
-            log(f"❌ 진입 가격이 유효하지 않아 스탑로스 설정 불가: {entry_price}")
-            return None
-        
-        # 스탑로스 가격 계산
-        if signal_type == 'bearish':
-            # 숏: 진입가보다 위
-            stop_price = entry_price * (1 + STOP_LOSS_BEAR / 100)
-            side = SIDE_BUY  # 숏 청산 = 매수
-        else:
-            # 롱: 진입가보다 아래
-            stop_price = entry_price * (1 - STOP_LOSS_BULL / 100)
-            side = SIDE_SELL  # 롱 청산 = 매도
-        
-        # 🔧 스탑 가격 유효성 검증
-        if stop_price <= 0:
-            log(f"❌ 스탑로스 가격이 음수: {stop_price}")
-            return None
-        
-        # 스탑로스 주문
-        stop_order = client.futures_create_order(
-            symbol=SYMBOL,
-            side=side,
-            type=FUTURE_ORDER_TYPE_STOP_MARKET,
-            stopPrice=round(stop_price, 2),
-            quantity=position['amount'],
-            closePosition=True
-        )
-        
-        log(f"🛡️ 스탑로스 설정: {stop_price:.2f} ({STOP_LOSS_BEAR if signal_type == 'bearish' else STOP_LOSS_BULL}%)")
-        return stop_order['orderId']
-        
-    except Exception as e:
-        log(f"❌ 스탑로스 설정 실패: {e}")
-        return None
+    """스탑로스 설정 - 봇이 직접 관리하므로 비활성화"""
+    log(f"ℹ️ 스탑로스는 봇이 직접 관리합니다 (바이낸스 주문 사용 안함)")
+    return None
 
 def execute_partial_close(position, ratio=0.5):
     """부분 청산 - 정확한 수량 계산"""
@@ -542,14 +517,6 @@ def execute_full_close(position):
     except Exception as e:
         log(f"❌ 전체 청산 실패: {e}")
         return None
-
-def cancel_stop_loss(stop_order_id):
-    """스탑로스 취소"""
-    try:
-        client.futures_cancel_order(symbol=SYMBOL, orderId=stop_order_id)
-        log(f"🗑️ 스탑로스 주문 취소: {stop_order_id}")
-    except Exception as e:
-        log(f"⚠️ 스탑로스 취소 실패: {e}")
 
 def get_current_price():
     """현재 가격 조회"""
@@ -626,9 +593,14 @@ def main():
     log(f"타임프레임: {TIMEFRAME}")
     log(f"레버리지: {LEVERAGE}배")
     log(f"포지션 크기: {POSITION_SIZE} BTC")
-    log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% 도달 시 {PARTIAL_PROFIT_RATIO*100}%")
-    log(f"보유 기간: {HOLD_BARS}봉 (225분)")
+    log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% 도달 시 {PARTIAL_PROFIT_RATIO*100:.0f}%")
+    
+    hold_minutes = HOLD_BARS * 15
+    hold_hours = hold_minutes / 60
+    log(f"보유 기간: {HOLD_BARS}봉 ({hold_minutes}분 = 약 {hold_hours:.1f}시간)")
     log(f"스탑로스: Bear {STOP_LOSS_BEAR}%, Bull {STOP_LOSS_BULL}%")
+    log(f"최대 포지션: {MAX_POSITIONS}개")
+    log(f"체크 주기: 포지션 관리 1분, 신호 감지 15분")
     log("="*80)
     
     # 포지션 추적
@@ -636,90 +608,104 @@ def main():
     # 🔧 진입한 신호 인덱스 기록 (중복 방지)
     entered_signals = set()
     
+    # 🔧 마지막 신호 체크 시간 추적
+    last_signal_check_time = datetime.now()
+    
     while True:
         try:
+            current_time = datetime.now()
             log(f"\n{'='*60}")
-            log(f"📊 데이터 업데이트 중... ({datetime.now().strftime('%Y-%m-%d %H:%M:%S')})")
+            log(f"📊 데이터 업데이트 중... ({current_time.strftime('%Y-%m-%d %H:%M:%S')})")
             
-            # 1. 최신 데이터 가져오기
-            df = get_historical_data(SYMBOL, TIMEFRAME, limit=CANDLES_TO_LOAD)
+            # 🔧 15분마다 신호 체크
+            minutes_since_last_check = (current_time - last_signal_check_time).total_seconds() / 60
+            should_check_signals = minutes_since_last_check >= 15
             
-            if df is None:
-                log("❌ 데이터 로드 실패, 60초 후 재시도...")
-                time.sleep(60)
-                continue
-            
-            log(f"✅ 데이터 로드: {len(df)}개 캔들")
-            
-            # 2. RSI 계산
-            df['rsi'] = calculate_rsi(df['close'], RSI_PERIOD)
-            df = df.dropna().reset_index(drop=True)
-            
-            log(f"✅ RSI 계산 후: {len(df)}개 캔들")
-            
-            # 필요한 최소 데이터 체크
-            required_candles = RSI_PERIOD + LOOKBACK_LEFT + RANGE_UPPER
-            
-            if len(df) < required_candles:
-                log(f"⚠️ 데이터 부족: {len(df)}개 < {required_candles}개 필요")
-                log(f"   (RSI={RSI_PERIOD} + LOOKBACK={LOOKBACK_LEFT} + RANGE={RANGE_UPPER})")
-                log(f"   📌 CANDLES_TO_LOAD를 {CANDLES_TO_LOAD + 50}로 증가 권장")
-                time.sleep(60)
-                continue
-            
-            current_price = df['close'].iloc[-1]
-            current_rsi = df['rsi'].iloc[-1]
-            log(f"현재 가격: ${current_price:,.2f}, RSI: {current_rsi:.2f}")
-            
-            # 3. 다이버전스 신호 감지
-            if len(active_positions) < MAX_POSITIONS:
-                signals = detect_regular_divergence(df)
+            if should_check_signals:
+                log(f"🔍 다이버전스 신호 체크 시작 (마지막 체크: {minutes_since_last_check:.1f}분 전)")
                 
-                if signals:
-                    for signal in signals:
-                        signal_index = signal['index']
-                        
-                        # 🔧 이미 진입한 신호는 건너뛰기
-                        if signal_index in entered_signals:
-                            log(f"⚠️ 신호 #{signal_index}는 이미 진입함, 건너뜀")
-                            continue
-                        
-                        # 진입 시도
-                        position = execute_entry(signal['type'], POSITION_SIZE)
-                        
-                        if position:
-                            # 진입 성공
-                            # 🔧 포지션 ID 생성
-                            position_id = get_next_position_id()
+                # 1. 최신 데이터 가져오기
+                df = get_historical_data(SYMBOL, TIMEFRAME, limit=CANDLES_TO_LOAD)
+                
+                if df is None:
+                    log("❌ 데이터 로드 실패, 60초 후 재시도...")
+                    time.sleep(60)
+                    continue
+                
+                log(f"✅ 데이터 로드: {len(df)}개 캔들")
+                
+                # 2. RSI 계산
+                df['rsi'] = calculate_rsi(df['close'], RSI_PERIOD)
+                df = df.dropna().reset_index(drop=True)
+                
+                log(f"✅ RSI 계산 후: {len(df)}개 캔들")
+                
+                # 필요한 최소 데이터 체크
+                required_candles = RSI_PERIOD + LOOKBACK_LEFT + RANGE_UPPER
+                
+                if len(df) < required_candles:
+                    log(f"⚠️ 데이터 부족: {len(df)}개 < {required_candles}개 필요")
+                    log(f"   (RSI={RSI_PERIOD} + LOOKBACK={LOOKBACK_LEFT} + RANGE={RANGE_UPPER})")
+                    log(f"   📌 CANDLES_TO_LOAD를 {CANDLES_TO_LOAD + 50}로 증가 권장")
+                    time.sleep(60)
+                    continue
+                
+                current_price = df['close'].iloc[-1]
+                current_rsi = df['rsi'].iloc[-1]
+                log(f"현재 가격: ${current_price:,.2f}, RSI: {current_rsi:.2f}")
+                
+                # 3. 다이버전스 신호 감지
+                if len(active_positions) < MAX_POSITIONS:
+                    signals = detect_regular_divergence(df)
+                    
+                    if signals:
+                        for signal in signals:
+                            signal_index = signal['index']
                             
-                            # 스탑로스 설정
-                            stop_order_id = set_stop_loss(position)
+                            # 🔧 이미 진입한 신호는 건너뛰기
+                            if signal_index in entered_signals:
+                                log(f"⚠️ 신호 #{signal_index}는 이미 진입함, 건너뜀")
+                                continue
                             
-                            # 포지션 기록
-                            position['position_id'] = position_id  # 내부 추적 ID
-                            position['stop_order_id'] = stop_order_id
-                            position['partial_closed'] = False
-                            position['signal_index'] = signal_index
-                            position['initial_amount'] = POSITION_SIZE  # 초기 진입 수량 기록
+                            # 진입 시도
+                            position = execute_entry(signal['type'], POSITION_SIZE)
                             
-                            active_positions[position_id] = position  # 🔧 position_id를 키로 사용
-                            entered_signals.add(signal_index)
-                            
-                            log(f"✅ 포지션 오픈 완료: ID={position_id}, {signal['type'].upper()}, 수량={POSITION_SIZE} BTC (총 {len(active_positions)}개)")
-                            
-                            # 최대 포지션 도달 시 중단
-                            if len(active_positions) >= MAX_POSITIONS:
-                                break
-                        else:
-                            # 🔧 진입 실패 (잔고 부족 등)
-                            # 신호는 기록하되 포지션은 열지 않음
-                            entered_signals.add(signal_index)
-                            log(f"⚠️ 진입 실패했지만 신호 #{signal_index} 기록 (중복 방지)")
+                            if position:
+                                # 진입 성공
+                                # 🔧 포지션 ID 생성
+                                position_id = get_next_position_id()
+                                
+                                # 스탑로스 설정 (None 반환)
+                                stop_order_id = set_stop_loss(position)
+                                
+                                # 포지션 기록
+                                position['position_id'] = position_id
+                                position['stop_order_id'] = stop_order_id
+                                position['partial_closed'] = False
+                                position['signal_index'] = signal_index
+                                position['initial_amount'] = POSITION_SIZE
+                                
+                                active_positions[position_id] = position
+                                entered_signals.add(signal_index)
+                                
+                                log(f"✅ 포지션 오픈 완료: ID={position_id}, {signal['type'].upper()}, 수량={POSITION_SIZE} BTC (총 {len(active_positions)}개)")
+                                
+                                # 최대 포지션 도달 시 중단
+                                if len(active_positions) >= MAX_POSITIONS:
+                                    break
+                            else:
+                                # 🔧 진입 실패 (잔고 부족 등)
+                                # 신호는 기록하되 포지션은 열지 않음
+                                entered_signals.add(signal_index)
+                                log(f"⚠️ 진입 실패했지만 신호 #{signal_index} 기록 (중복 방지)")
+                    else:
+                        if len(active_positions) == 0:
+                            log("📭 신호 없음")
                 else:
-                    if len(active_positions) == 0:
-                        log("📭 신호 없음")
-            else:
-                log(f"⚠️ 최대 포지션 수 도달 ({MAX_POSITIONS}개), 신호 무시")
+                    log(f"⚠️ 최대 포지션 수 도달 ({MAX_POSITIONS}개), 신호 무시")
+                
+                # 신호 체크 시간 업데이트
+                last_signal_check_time = current_time
             
             # 4. 기존 포지션 관리
             for pos_id in list(active_positions.keys()):
@@ -735,6 +721,31 @@ def main():
                 
                 # 현재 수익률 계산 (종가 기준)
                 profit = calculate_profit(position, current_price)
+                
+                # 🛡️ 스탑로스 체크 (최우선 - 부분익절/보유기간보다 먼저)
+                stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
+                
+                if profit <= -stop_loss_pct:
+                    log(f"🚨 포지션 ID={pos_id} 스탑로스 도달! 손실: {profit:.2f}% (기준: -{stop_loss_pct}%)")
+                    
+                    # 남은 수량 전체 청산
+                    result = execute_full_close(position)
+                    
+                    if result:
+                        final_price = get_current_price()
+                        final_profit = calculate_profit(position, final_price)
+                        
+                        log(f"🏁 포지션 ID={pos_id} 스탑로스 청산 완료: 최종 손실 {final_profit:.2f}%")
+                        
+                        # 텔레그램 알림
+                        send_stop_loss_alert(position)
+                        
+                        # 포지션 제거
+                        del active_positions[pos_id]
+                        if 'signal_index' in position:
+                            entered_signals.discard(position['signal_index'])
+                    
+                    continue  # 다음 포지션으로 (부분익절/보유기간 체크 건너뜀)
                 
                 # 현재 봉에서 도달 가능한 최대 수익률 (고가/저가 기준)
                 max_profit_in_candle = calculate_max_profit_in_candle(position, current_candle)
@@ -769,7 +780,7 @@ def main():
                         # 텔레그램 알림
                         send_partial_close_alert(position, max_profit_in_candle)
                 
-                # 15봉 도달 체크 (실제 시간 기준)
+                # 보유기간 도달 체크 (실제 시간 기준)
                 if bars_held >= HOLD_BARS:
                     log(f"⏰ 포지션 ID={pos_id} {HOLD_BARS}봉 도달! ({minutes_held:.0f}분 경과) 전체 청산 실행")
                     
@@ -777,10 +788,6 @@ def main():
                     result = execute_full_close(position)
                     
                     if result:
-                        # 스탑로스 취소
-                        if position.get('stop_order_id'):
-                            cancel_stop_loss(position['stop_order_id'])
-                        
                         # 최종 수익 계산
                         final_price = get_current_price()
                         final_profit = calculate_profit(position, final_price)
@@ -796,15 +803,17 @@ def main():
                         if 'signal_index' in position:
                             entered_signals.discard(position['signal_index'])
             
-            # 5. 다음 봉까지 대기
+            # 5. 다음 체크까지 대기
             current_time = datetime.now()
             
             # 🔧 매 시간마다 포지션 상태 전송 (예: 매시 00분)
             if active_positions and current_time.minute == 0:
                 send_positions_status(active_positions)
             
-            log(f"\n⏳ 다음 봉까지 대기 중... (15분) - 현재: {current_time.strftime('%H:%M:%S')}")
-            time.sleep(900)  # 15분 = 900초
+            log(f"\n⏳ 다음 체크까지 대기 중... (1분) - 현재: {current_time.strftime('%H:%M:%S')}")
+            log(f"   • 포지션 관리: 매 1분마다")
+            log(f"   • 신호 체크: 매 15분마다 (다음: {(last_signal_check_time + timedelta(minutes=15)).strftime('%H:%M:%S')})")
+            time.sleep(60)  # 🔧 1분 = 60초
             
         except KeyboardInterrupt:
             log("\n🛑 봇 종료 (사용자 중단)")
