@@ -1,0 +1,488 @@
+"""
+RSI Divergence 파라미터 그리드 서치 (멀티프로세싱 버전)
+훨씬 빠릅니다! (약 4~8배 속도 향상)
+"""
+import pandas as pd
+import numpy as np
+import json
+import itertools
+from datetime import datetime
+import sys
+from multiprocessing import Pool, cpu_count
+from functools import partial
+
+class RSIDivergenceGridSearchFast:
+    def __init__(self, json_file_path):
+        self.json_file_path = json_file_path
+        self.df = None
+        self.all_results = []
+        
+    def load_data(self):
+        """JSON 파일에서 캔들 데이터 로드"""
+        with open(self.json_file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        self.df = pd.DataFrame(data)
+        
+        # 컬럼명 자동 감지
+        col_mapping = {}
+        for col in self.df.columns:
+            col_lower = col.lower()
+            if col_lower in ['open', 'o']:
+                col_mapping['open'] = col
+            elif col_lower in ['high', 'h']:
+                col_mapping['high'] = col
+            elif col_lower in ['low', 'l']:
+                col_mapping['low'] = col
+            elif col_lower in ['close', 'c']:
+                col_mapping['close'] = col
+        
+        if len(col_mapping) < 4:
+            raise ValueError(f"필수 컬럼 없음. 발견된 컬럼: {list(self.df.columns)}")
+        
+        self.df = self.df.rename(columns={v: k for k, v in col_mapping.items()})
+        
+        # RSI 계산
+        delta = self.df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        self.df['rsi'] = 100 - (100 / (1 + rs))
+        self.df = self.df.dropna().reset_index(drop=True)
+        
+        print(f"✅ 데이터 로드 완료: {len(self.df)}개 캔들")
+        return self
+    
+    def grid_search(self, 
+                   lookback_right_range, 
+                   partial_profit_range, 
+                   hold_bars_range,
+                   stop_loss_range,
+                   fee_rate=0.0,
+                   n_jobs=None):
+        """
+        그리드 서치 실행 (멀티프로세싱)
+        
+        Parameters:
+        -----------
+        stop_loss_range : list or range
+            스탑로스 범위 (예: [0.5, 1.0, 1.5, 2.0] 또는 [0]은 스탑로스 없음)
+        n_jobs : int or None
+            병렬 작업 수 (None = CPU 코어 수)
+        """
+        if self.df is None:
+            self.load_data()
+        
+        # 모든 조합 생성
+        combinations = list(itertools.product(
+            lookback_right_range, 
+            partial_profit_range, 
+            hold_bars_range,
+            stop_loss_range
+        ))
+        
+        total_combinations = len(combinations)
+        
+        if n_jobs is None:
+            n_jobs = cpu_count() - 4
+        
+        print(f"\n🚀 고속 그리드 서치 시작 (멀티프로세싱)")
+        print(f"   lookback_right: {list(lookback_right_range)}")
+        print(f"   partial_profit: {list(partial_profit_range)}")
+        print(f"   hold_bars: {list(hold_bars_range)}")
+        print(f"   stop_loss: {list(stop_loss_range)}")
+        print(f"   수수료율: {fee_rate}%")
+        print(f"   총 테스트 조합: {total_combinations:,}개")
+        print(f"   병렬 작업 수: {n_jobs}개 CPU 코어\n")
+        
+        start_time = datetime.now()
+        
+        # 데이터를 딕셔너리로 변환 (멀티프로세싱용)
+        df_dict = {
+            'open': self.df['open'].tolist(),
+            'high': self.df['high'].tolist(),
+            'low': self.df['low'].tolist(),
+            'close': self.df['close'].tolist(),
+            'rsi': self.df['rsi'].tolist()
+        }
+        
+        # 병렬 처리
+        worker_func = partial(process_single_combination, df_dict=df_dict, fee_rate=fee_rate)
+        
+        with Pool(processes=n_jobs) as pool:
+            results = []
+            
+            # 진행률 표시하면서 처리
+            for i, result in enumerate(pool.imap(worker_func, combinations), 1):
+                if result:
+                    results.append(result)
+                
+                # 실시간 진행률 (100개마다)
+                if i % 100 == 0 or i == total_combinations:
+                    progress = (i / total_combinations) * 100
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    rate = i / elapsed if elapsed > 0 else 0
+                    remaining = (total_combinations - i) / rate if rate > 0 else 0
+                    
+                    best_pnl = max([r['total_pnl'] for r in results]) if results else 0
+                    
+                    print(f"\r진행: {progress:5.1f}% ({i:,}/{total_combinations:,}) | "
+                          f"속도: {rate:.0f}개/초 | 남은시간: {remaining:.0f}초 | "
+                          f"현재 최고: {best_pnl:+.2f}%", end='', flush=True)
+        
+        print()
+        
+        elapsed_total = (datetime.now() - start_time).total_seconds()
+        print(f"\n✅ 완료! 소요시간: {elapsed_total:.1f}초 | 유효한 결과: {len(results):,}개\n")
+        
+        self.all_results = results
+        return pd.DataFrame(results)
+    
+    def get_top_results(self, n=10, sort_by='total_pnl'):
+        """상위 결과 조회"""
+        if not self.all_results:
+            print("먼저 grid_search()를 실행하세요")
+            return None
+        
+        df = pd.DataFrame(self.all_results)
+        df = df.sort_values(sort_by, ascending=False).head(n)
+        return df
+    
+    def save_results(self, filename='grid_search_results.csv'):
+        """결과를 CSV 파일로 저장"""
+        if not self.all_results:
+            print("먼저 grid_search()를 실행하세요")
+            return
+        
+        df = pd.DataFrame(self.all_results)
+        df = df.sort_values('total_pnl', ascending=False)
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
+        
+        print(f"💾 결과 저장: {filename}")
+
+
+def process_single_combination(params, df_dict, fee_rate):
+    """단일 조합 처리 (멀티프로세싱 워커 함수)"""
+    lr, pp, hb, sl = params
+    
+    # 다이버전스 감지
+    bear_signals, bull_signals = detect_divergences_fast(df_dict, lr)
+    
+    # 거래 실행 및 포지션 추적
+    all_trades = []
+    
+    for signal_idx in bear_signals:
+        result = execute_trade_fast(df_dict, signal_idx, 'bear', pp, hb, sl)
+        if result:
+            result['entry_bar'] = signal_idx
+            result['signal_type'] = 'bear'
+            all_trades.append(result)
+    
+    for signal_idx in bull_signals:
+        result = execute_trade_fast(df_dict, signal_idx, 'bull', pp, hb, sl)
+        if result:
+            result['entry_bar'] = signal_idx
+            result['signal_type'] = 'bull'
+            all_trades.append(result)
+    
+    if not all_trades:
+        return None
+    
+    # 시간순 정렬
+    all_trades.sort(key=lambda x: x['entry_bar'])
+    
+    # 동시 포지션 개수 계산
+    max_concurrent = 0
+    n_bars = len(df_dict['close'])
+    
+    for bar in range(n_bars):
+        concurrent_count = 0
+        for trade in all_trades:
+            entry = trade['entry_bar']
+            exit = entry + trade['exit_bar']
+            if entry <= bar <= exit:
+                concurrent_count += 1
+        if concurrent_count > max_concurrent:
+            max_concurrent = concurrent_count
+    
+    # 통계 계산
+    total_trades = len(all_trades)
+    total_pnl_before_fee = sum([t['pnl'] for t in all_trades])
+    total_fee = total_trades * 2 * fee_rate
+    total_pnl = total_pnl_before_fee - total_fee
+    wins = sum(1 for t in all_trades if t['pnl'] > 0)
+    win_rate = (wins / total_trades) * 100
+    
+    # 최고 손실율 계산
+    max_loss = min([t['max_loss'] for t in all_trades])
+    max_profit = max([t['max_profit'] for t in all_trades])
+    avg_max_loss = sum([t['max_loss'] for t in all_trades]) / total_trades
+    
+    # 평균 수익률과 평균 손실률
+    winning_trades = [t['pnl'] for t in all_trades if t['pnl'] > 0]
+    losing_trades = [t['pnl'] for t in all_trades if t['pnl'] <= 0]
+    
+    avg_win = sum(winning_trades) / len(winning_trades) if winning_trades else 0
+    avg_loss = sum(losing_trades) / len(losing_trades) if losing_trades else 0
+    avg_pnl = total_pnl / total_trades
+    
+    # 스탑로스 발동 횟수
+    stop_loss_count = sum(1 for t in all_trades if t['stop_loss_hit'])
+    stop_loss_rate = (stop_loss_count / total_trades) * 100
+    
+    return {
+        'lookback_right': lr,
+        'partial_profit': pp,
+        'hold_bars': hb,
+        'stop_loss': sl,
+        'fee_rate': fee_rate,
+        'total_trades': total_trades,
+        'win_rate': win_rate,
+        'total_pnl_before_fee': total_pnl_before_fee,
+        'total_fee': total_fee,
+        'total_pnl': total_pnl,
+        'avg_pnl': avg_pnl,
+        'avg_win': avg_win,
+        'avg_loss': avg_loss,
+        'max_loss': max_loss,
+        'avg_max_loss': avg_max_loss,
+        'max_profit': max_profit,
+        'stop_loss_count': stop_loss_count,
+        'stop_loss_rate': stop_loss_rate,
+        'max_concurrent_positions': max_concurrent
+    }
+
+
+def detect_divergences_fast(df_dict, lookback_right):
+    """다이버전스 감지 (고속 버전)"""
+    rsi = df_dict['rsi']
+    high = df_dict['high']
+    low = df_dict['low']
+    n = len(rsi)
+    
+    lookback_left = 5
+    range_lower = 5
+    range_upper = 60
+    
+    bear_signals = []
+    bull_signals = []
+    
+    for i in range(lookback_left, n - lookback_right):
+        # Bearish
+        if is_pivot_high(rsi, i, lookback_left, lookback_right):
+            for j in range(i - range_lower, max(i - range_upper, lookback_left), -1):
+                if is_pivot_high(rsi, j, lookback_left, lookback_right):
+                    signal_idx = i + lookback_right
+                    if signal_idx < n and rsi[i] < rsi[j] and high[i] > high[j]:
+                        bear_signals.append(signal_idx)
+                    break
+        
+        # Bullish
+        if is_pivot_low(rsi, i, lookback_left, lookback_right):
+            for j in range(i - range_lower, max(i - range_upper, lookback_left), -1):
+                if is_pivot_low(rsi, j, lookback_left, lookback_right):
+                    signal_idx = i + lookback_right
+                    if signal_idx < n and rsi[i] > rsi[j] and low[i] < low[j]:
+                        bull_signals.append(signal_idx)
+                    break
+    
+    return bear_signals, bull_signals
+
+
+def is_pivot_high(series, idx, left, right):
+    """피벗 고점 확인"""
+    center = series[idx]
+    left_ok = all(series[idx-left:idx][i] < center for i in range(len(series[idx-left:idx])))
+    if right == 0:
+        return left_ok
+    right_ok = all(series[idx+1:idx+right+1][i] < center for i in range(len(series[idx+1:idx+right+1])))
+    return left_ok and right_ok
+
+
+def is_pivot_low(series, idx, left, right):
+    """피벗 저점 확인"""
+    center = series[idx]
+    left_ok = all(series[idx-left:idx][i] > center for i in range(len(series[idx-left:idx])))
+    if right == 0:
+        return left_ok
+    right_ok = all(series[idx+1:idx+right+1][i] > center for i in range(len(series[idx+1:idx+right+1])))
+    return left_ok and right_ok
+
+
+def execute_trade_fast(df_dict, signal_idx, signal_type, partial_profit_target, hold_bars, stop_loss):
+    """거래 실행 (고속 버전) - 스탑로스 포함"""
+    close = df_dict['close']
+    high = df_dict['high']
+    low = df_dict['low']
+    
+    if signal_idx + hold_bars >= len(close):
+        return None
+    
+    entry_price = close[signal_idx]
+    
+    partial_closed = False
+    partial_pnl = 0
+    max_profit = 0
+    max_loss = 0
+    stop_loss_hit = False
+    exit_bar = hold_bars
+    
+    for i in range(signal_idx, signal_idx + hold_bars + 1):
+        if signal_type == 'bear':
+            current_profit = ((entry_price - low[i]) / entry_price) * 100
+            current_loss = ((entry_price - high[i]) / entry_price) * 100
+        else:
+            current_profit = ((high[i] - entry_price) / entry_price) * 100
+            current_loss = ((low[i] - entry_price) / entry_price) * 100
+        
+        # 최고 수익/손실 추적
+        if current_profit > max_profit:
+            max_profit = current_profit
+        if current_loss < max_loss:
+            max_loss = current_loss
+        
+        # 스탑로스 체크 (음수 값으로 비교)
+        if stop_loss > 0 and current_loss <= -stop_loss:
+            stop_loss_hit = True
+            exit_bar = i - signal_idx
+            # 스탑로스 발동 시 즉시 청산
+            if signal_type == 'bear':
+                total_pnl = ((entry_price - high[i]) / entry_price) * 100
+            else:
+                total_pnl = ((low[i] - entry_price) / entry_price) * 100
+            return {
+                'pnl': total_pnl,
+                'max_loss': max_loss,
+                'max_profit': max_profit,
+                'stop_loss_hit': True,
+                'exit_bar': exit_bar
+            }
+        
+        # 부분익절 체크
+        if not partial_closed and current_profit >= partial_profit_target:
+            partial_pnl = current_profit * 0.5
+            partial_closed = True
+    
+    # 정상 청산 (보유기간 종료)
+    exit_price = close[signal_idx + hold_bars]
+    if signal_type == 'bear':
+        remaining_pnl = ((entry_price - exit_price) / entry_price) * 100 * 0.5
+    else:
+        remaining_pnl = ((exit_price - entry_price) / entry_price) * 100 * 0.5
+    
+    total_pnl = partial_pnl + remaining_pnl
+    
+    return {
+        'pnl': total_pnl,
+        'max_loss': max_loss,
+        'max_profit': max_profit,
+        'stop_loss_hit': False,
+        'exit_bar': exit_bar
+    }
+
+
+def main():
+    """메인 함수"""
+    if len(sys.argv) < 2:
+        print("""
+사용법:
+    python backtest_grid_search_fast.py <json_파일>
+
+예시:
+    python backtest_grid_search_fast.py btc_15m_data.json
+        """)
+        return
+    
+    json_file = sys.argv[1]
+    
+    searcher = RSIDivergenceGridSearchFast(json_file)
+    
+    print("\n" + "="*80)
+    print("파라미터 범위를 입력하세요 (Enter = 기본값)")
+    print("="*80)
+    
+    # lookback_right
+    lr_input = input("lookback_right 범위 (예: 1-10) [기본: 1-5]: ").strip()
+    if lr_input and '-' in lr_input:
+        lr_start, lr_end = map(int, lr_input.split('-'))
+        lookback_right_range = range(lr_start, lr_end + 1)
+    else:
+        lookback_right_range = range(1, 6)
+    
+    # partial_profit
+    pp_input = input("부분익절% 범위 (예: 0.1-2.0-0.1) [기본: 0.4-2.0-0.1]: ").strip()
+    if pp_input and '-' in pp_input:
+        parts = pp_input.split('-')
+        pp_start, pp_end, pp_step = float(parts[0]), float(parts[1]), float(parts[2])
+        partial_profit_range = np.arange(pp_start, pp_end + pp_step/2, pp_step)
+        partial_profit_range = np.round(partial_profit_range, 2)
+    else:
+        partial_profit_range = np.arange(0.4, 2.0, 0.1)
+        partial_profit_range = np.round(partial_profit_range, 2)
+    
+    # hold_bars
+    hb_input = input("보유기간(봉) 범위 (예: 5-30) [기본: 15-35]: ").strip()
+    if hb_input and '-' in hb_input:
+        hb_start, hb_end = map(int, hb_input.split('-'))
+        hold_bars_range = range(hb_start, hb_end + 1)
+    else:
+        hold_bars_range = range(15, 36)
+    
+    # stop_loss
+    sl_input = input("스탑로스% 범위 (예: 0.5-2.0-0.5 또는 0은 없음) [기본: 2.0-4.0-0.1]: ").strip()
+    if sl_input and '-' in sl_input:
+        parts = sl_input.split('-')
+        sl_start, sl_end, sl_step = float(parts[0]), float(parts[1]), float(parts[2])
+        stop_loss_range = np.arange(sl_start, sl_end + sl_step/2, sl_step)
+        stop_loss_range = np.round(stop_loss_range, 2)
+    else:
+        stop_loss_range = np.arange(2, 4.0, 0.1)
+        stop_loss_range = np.round(stop_loss_range, 2)
+    
+    # 수수료
+    fee_input = input("수수료율% (예: 0.05) [기본: 0.05]: ").strip()
+    fee_rate = float(fee_input) if fee_input else 0.05
+    
+    # 그리드 서치 실행
+    df_results = searcher.grid_search(
+        lookback_right_range=lookback_right_range,
+        partial_profit_range=partial_profit_range,
+        hold_bars_range=hold_bars_range,
+        stop_loss_range=stop_loss_range,
+        fee_rate=fee_rate
+    )
+    
+    # 상위 결과 출력
+    print("\n" + "="*100)
+    print("🏆 TOP 20 결과 (총수익 기준)")
+    print("="*100)
+    
+    top_20 = searcher.get_top_results(n=20)
+    print(top_20.to_string(index=False))
+    
+    # 결과 저장
+    searcher.save_results('grid_search_results_fast.csv')
+    
+    # 최고 결과
+    best = top_20.iloc[0]
+    print("\n" + "="*100)
+    print("🥇 최고 성과 파라미터")
+    print("="*100)
+    print(f"lookback_right: {best['lookback_right']}")
+    print(f"부분익절: {best['partial_profit']}%")
+    print(f"보유기간: {best['hold_bars']}봉")
+    print(f"스탑로스: {best['stop_loss']}%")
+    print(f"총 거래: {best['total_trades']}개")
+    print(f"승률: {best['win_rate']:.1f}%")
+    print(f"총 수익: {best['total_pnl']:+.2f}%")
+    print(f"평균 수익: {best['avg_pnl']:+.3f}%")
+    print(f"평균 수익(승): {best['avg_win']:+.3f}%")
+    print(f"평균 손실(패): {best['avg_loss']:+.3f}%")
+    print(f"최고 손실: {best['max_loss']:.2f}%")
+    print(f"평균 최고 손실: {best['avg_max_loss']:.2f}%")
+    print(f"스탑로스 발동: {best['stop_loss_count']}회 ({best['stop_loss_rate']:.1f}%)")
+    print(f"최대 동시 포지션: {best['max_concurrent_positions']}개")
+
+
+if __name__ == "__main__":
+    main()
