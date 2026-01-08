@@ -9,23 +9,18 @@ from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
 
-# .env 로드 및 클라이언트 생성
 load_dotenv()
 client = Client(os.getenv('API_KEY'), os.getenv('SECRET_KEY'))
 
-# 텔레그램 설정
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
-# 포지션 ID 카운터
 POSITION_COUNTER = 0
 
 def get_next_position_id():
-    """포지션 ID 생성"""
     global POSITION_COUNTER
     POSITION_COUNTER += 1
     return POSITION_COUNTER
-
 
 # ============================================================================
 # 설정값
@@ -38,187 +33,135 @@ POSITION_SIZE = 0.002  # BTC 수량
 
 # 전략 파라미터
 RSI_PERIOD = 14
-LOOKBACK_LEFT = 5
-LOOKBACK_RIGHT = 1
+LOOKBACK_LEFT = 2
+LOOKBACK_RIGHT = 5
 RANGE_LOWER = 5
 RANGE_UPPER = 60
 
 # 청산 설정
 HOLD_BARS = 38  # 15봉 = 225분 = 3.75시간
-PARTIAL_PROFIT_TARGET = 0.4  # 0.4% 도달 시
+PARTIAL_PROFIT_TARGET = 0.8  # 0.4% 도달 시
 PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
 
 # 포지션 관리
-MAX_POSITIONS = 3  # 최대 동시 포지션 수
+MAX_POSITIONS = 5  # 최대 동시 포지션 수
 
 # 리스크 관리
-STOP_LOSS_BEAR = 2.1  # Bearish 스탑로스 (%)
-STOP_LOSS_BULL = 2.1  # Bullish 스탑로스 (%)
+STOP_LOSS_BEAR = 7.4  # Bearish 스탑로스 (%)
+STOP_LOSS_BULL = 7.4  # Bullish 스탑로스 (%)
 
 # 데이터 설정
 CANDLES_TO_LOAD = 300  # RSI 계산 후 dropna를 고려하여 여유있게 설정
 
 # ============================================================================
-# 텔레그램 알림 함수
+# 텔레그램 (간소화)
 # ============================================================================
 
 def send_telegram_message(message):
-    """텔레그램 메시지 전송"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
-    
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        data = {
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
+        data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
         response = requests.post(url, data=data, timeout=10)
         return response.status_code == 200
     except:
         return False
 
-def send_divergence_alert(signal_type, current_price, current_rsi):
-    """다이버전스 감지 알림"""
-    emoji = "🔴" if signal_type == "bearish" else "🟢"
-    type_kr = "Bearish (숏)" if signal_type == "bearish" else "Bullish (롱)"
-    
-    message = f"""
-{emoji} <b>다이버전스 신호 감지!</b>
-
-📊 타입: {type_kr}
-💰 현재가: ${current_price:,.2f}
-📈 RSI: {current_rsi:.2f}
-⏰ 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-🎯 진입 준비 중...
-"""
-    send_telegram_message(message)
-
 def send_entry_alert(position):
-    """진입 체결 알림"""
     emoji = "🔴" if position['type'] == "bearish" else "🟢"
     type_kr = "숏(SHORT)" if position['type'] == "bearish" else "롱(LONG)"
-    stop_loss = STOP_LOSS_BEAR if position['type'] == "bearish" else STOP_LOSS_BULL
-    
-    hold_minutes = HOLD_BARS * 15
-    hold_hours = hold_minutes / 60
-    expected_close_time = position['entry_time'] + timedelta(minutes=hold_minutes)
-    
+    expected_close = position['entry_time'] + timedelta(minutes=HOLD_BARS*15)
     message = f"""
-{emoji} <b>포지션 진입 완료!</b>
+{emoji} <b>포지션 진입!</b>
 
-📊 방향: {type_kr}
-💰 진입가: ${position['entry_price']:,.2f}
-📦 수량: {position['amount']} BTC
-🔢 레버리지: {LEVERAGE}배
-🛡️ 스탑로스: {stop_loss}%
-
-⏰ 진입: {position['entry_time'].strftime('%Y-%m-%d %H:%M:%S')}
-⏰ 예상 종료: {expected_close_time.strftime('%Y-%m-%d %H:%M:%S')} ({HOLD_BARS}봉 후)
-
-📌 목표:
-  • 부분 익절: {PARTIAL_PROFIT_TARGET}% 도달 시 {PARTIAL_PROFIT_RATIO*100:.0f}%
-  • 전체 청산: {HOLD_BARS}봉 후 (약 {hold_hours:.1f}시간)
+📊 {type_kr}
+💰 ${position['entry_price']:,.2f}
+⏰ {position['entry_time'].strftime('%H:%M:%S')}
+🎯 예상 청산: {expected_close.strftime('%H:%M:%S')} ({HOLD_BARS}봉)
 """
     send_telegram_message(message)
 
-def send_partial_close_alert(position, profit):
-    """부분 익절 알림"""
-    hold_minutes = HOLD_BARS * 15
-    hold_hours = hold_minutes / 60
-    
-    message = f"""
-💰 <b>부분 익절 체결!</b>
-
-📊 포지션: {'숏' if position['type'] == 'bearish' else '롱'}
-✅ 익절 비율: {PARTIAL_PROFIT_RATIO*100:.0f}%
-📈 현재 수익률: {profit:+.2f}%
-💵 진입가: ${position['entry_price']:,.2f}
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-🔄 남은 {(1-PARTIAL_PROFIT_RATIO)*100:.0f}%는 {HOLD_BARS}봉까지 보유 예정 (약 {hold_hours:.1f}시간)
-"""
-    send_telegram_message(message)
-
-def send_final_close_alert(position, final_profit, final_price):
-    """최종 청산 알림"""
+def send_exit_alert(position, reason, final_profit):
     emoji = "🎉" if final_profit > 0 else "😢"
-    
-    hold_time = datetime.now() - position['entry_time']
-    hours = hold_time.total_seconds() / 3600
-    
+    time_held = datetime.now() - position['entry_time']
+    hours = time_held.total_seconds() / 3600
     message = f"""
-{emoji} <b>포지션 최종 청산!</b>
+{emoji} <b>{reason}</b>
 
-📊 포지션: {'숏' if position['type'] == 'bearish' else '롱'}
-💰 진입가: ${position['entry_price']:,.2f}
-💵 청산가: ${final_price:,.2f}
-
-<b>📈 최종 수익률: {final_profit:+.2f}%</b>
-
-⏱️ 보유 시간: {hours:.1f}시간
-⏰ 청산 시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-{'🎊 수익 달성!' if final_profit > 0 else '📉 손실 발생'}
+📊 {'숏' if position['type'] == 'bearish' else '롱'}
+💰 ${position['entry_price']:,.2f}
+📈 수익: {final_profit:+.2f}%
+⏱️ 보유: {hours:.1f}시간
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
     send_telegram_message(message)
 
-def send_stop_loss_alert(position):
-    """스탑로스 체결 알림"""
-    stop_loss = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
-    
+def send_error_alert(error_type, error_message):
+    """에러 알림"""
     message = f"""
-🚨 <b>스탑로스 체결!</b>
+🚨 <b>에러 발생!</b>
 
-📊 포지션: {'숏' if position['type'] == 'bearish' else '롱'}
-💰 진입가: ${position['entry_price']:,.2f}
-🛡️ 손실률: -{stop_loss}%
+⚠️ 타입: {error_type}
+📋 내용: {error_message}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-⚠️ 손실 제한으로 포지션 종료
+🔄 60초 후 재시도합니다
 """
     send_telegram_message(message)
 
-def send_insufficient_balance_alert(signal_type, required_amount):
+def send_order_failed_alert(order_type, reason, details=""):
+    """주문 실패 알림"""
+    message = f"""
+❌ <b>주문 실패!</b>
+
+📊 타입: {order_type}
+❗ 사유: {reason}
+{f'📝 상세: {details}' if details else ''}
+⏰ {datetime.now().strftime('%H:%M:%S')}
+"""
+    send_telegram_message(message)
+
+def send_balance_insufficient_alert(required_amount):
     """잔고 부족 알림"""
     message = f"""
 ⚠️ <b>잔고 부족!</b>
 
-📊 신호: {'숏' if signal_type == 'bearish' else '롱'}
 💰 필요 수량: {required_amount} BTC
+🔍 거래소에서 잔고를 확인하세요
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ {datetime.now().strftime('%H:%M:%S')}
+"""
+    send_telegram_message(message)
 
-💡 거래소에서 잔고를 확인하세요
+def send_bot_restart_alert(reason=""):
+    """봇 재시작 알림"""
+    message = f"""
+🔄 <b>봇 재시작</b>
+
+{f'📋 사유: {reason}' if reason else ''}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
     send_telegram_message(message)
 
 # ============================================================================
-# 유틸리티 함수
+# 유틸리티
 # ============================================================================
 
 def log(message, level="INFO"):
-    """로그 출력 (간소화)"""
     timestamp = datetime.now().strftime("%H:%M:%S")
-    
-    # 🔧 INFO 레벨은 간략하게 (한 줄)
     if level == "INFO":
         print(f"[{timestamp}] {message}")
-    # 중요한 이벤트는 상세하게
     elif level == "EVENT":
         print(f"\n{'='*60}")
         print(f"[{timestamp}] {message}")
         print(f"{'='*60}")
-    # 에러는 강조
     elif level == "ERROR":
         print(f"\n❌ [{timestamp}] {message}")
+    elif level == "DEBUG":
+        print(f"🔍 [{timestamp}] {message}")
 
 def get_historical_data(symbol, interval, limit=100):
-    """과거 데이터 가져오기"""
     try:
         klines = client.futures_klines(symbol=symbol, interval=interval, limit=limit)
         df = pd.DataFrame(klines, columns=[
@@ -226,20 +169,17 @@ def get_historical_data(symbol, interval, limit=100):
             'close_time', 'quote_volume', 'trades', 'taker_buy_base',
             'taker_buy_quote', 'ignore'
         ])
-        
         df['open_time'] = pd.to_datetime(df['open_time'], unit='ms')
         df['close'] = df['close'].astype(float)
         df['high'] = df['high'].astype(float)
         df['low'] = df['low'].astype(float)
         df['open'] = df['open'].astype(float)
-        
         return df
     except Exception as e:
         log(f"데이터 로드 실패: {e}", "ERROR")
         return None
 
 def calculate_rsi(data, period=14):
-    """RSI 계산"""
     delta = data.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -248,7 +188,6 @@ def calculate_rsi(data, period=14):
     return rsi
 
 def find_pivot_high(series, left, right, idx):
-    """RSI 피벗 고점 감지"""
     if idx < left or idx >= len(series) - right:
         return False
     center_value = series.iloc[idx]
@@ -260,7 +199,6 @@ def find_pivot_high(series, left, right, idx):
     return left_lower and right_lower
 
 def find_pivot_low(series, left, right, idx):
-    """RSI 피벗 저점 감지"""
     if idx < left or idx >= len(series) - right:
         return False
     center_value = series.iloc[idx]
@@ -272,19 +210,16 @@ def find_pivot_low(series, left, right, idx):
     return left_higher and right_higher
 
 def detect_regular_divergence(df):
-    """Regular Divergence 감지"""
     signals = []
-    
     rsi = df['rsi']
     high = df['high']
     low = df['low']
-    
     check_idx = len(df) - LOOKBACK_RIGHT - 1
     
     if check_idx < LOOKBACK_LEFT:
         return signals
     
-    # Bearish Divergence
+    # Bearish
     if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx):
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
@@ -303,10 +238,9 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🔴 Bearish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
-                        send_divergence_alert('bearish', df['close'].iloc[signal_idx], rsi_curr)
                 break
     
-    # Bullish Divergence
+    # Bullish
     if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx):
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
@@ -325,31 +259,24 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🟢 Bullish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
-                        send_divergence_alert('bullish', df['close'].iloc[signal_idx], rsi_curr)
                 break
     
     return signals
 
 # ============================================================================
-# 주문 실행 함수 - 🔧 잔고 에러 처리 강화
+# 주문 실행
 # ============================================================================
 
 def execute_entry(signal_type, amount=POSITION_SIZE):
-    """진입 주문 실행 - 잔고 부족 명확히 처리"""
     try:
-        # 1. 마진 모드 설정
         try:
             client.futures_change_margin_type(symbol=SYMBOL, marginType='ISOLATED')
         except:
             pass
         
-        # 2. 레버리지 설정
         client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
-        
-        # 3. 포지션 방향 결정
         side = SIDE_SELL if signal_type == 'bearish' else SIDE_BUY
         
-        # 4. 시장가 주문
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
@@ -357,9 +284,7 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
             quantity=amount
         )
         
-        # 진입 가격 가져오기
         entry_price = 0.0
-        
         if 'avgPrice' in order and order['avgPrice']:
             entry_price = float(order['avgPrice'])
         elif 'fills' in order and order['fills']:
@@ -393,30 +318,25 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
         }
         
         send_entry_alert(position)
-        
         return position
     
-    # 🔧 잔고 부족 에러 명확히 처리
     except BinanceAPIException as e:
-        if e.code == -2019:  # Insufficient balance
+        if e.code == -2019:
             log(f"잔고 부족! 필요: {amount} BTC", "ERROR")
-            send_insufficient_balance_alert(signal_type, amount)
-        elif e.code == -4131:  # Reduce-only rejected
-            log(f"Reduce-only 거부 (포지션 없음)", "ERROR")
+            send_balance_insufficient_alert(amount)
+        elif e.code == -4131:
+            log(f"Reduce-only 거부", "ERROR")
+            send_order_failed_alert("진입", "Reduce-only 거부", "포지션이 없는 상태에서 reduceOnly 주문 시도")
         else:
             log(f"바이낸스 API 에러 [{e.code}]: {e.message}", "ERROR")
+            send_order_failed_alert("진입", f"API 에러 [{e.code}]", e.message)
         return None
-    
     except Exception as e:
         log(f"진입 주문 실패: {e}", "ERROR")
+        send_error_alert("진입 주문", str(e))
         return None
 
-def set_stop_loss(position):
-    """스탑로스 설정 - 봇이 직접 관리"""
-    return None
-
 def execute_partial_close(position, ratio=0.5):
-    """부분 청산"""
     try:
         close_amount = round(position['amount'] * ratio, 3)
         side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
@@ -431,13 +351,12 @@ def execute_partial_close(position, ratio=0.5):
         
         log(f"✅ 부분 익절 {close_amount:.4f} BTC", "EVENT")
         return order
-    
     except Exception as e:
         log(f"부분 청산 실패: {e}", "ERROR")
+        send_order_failed_alert("부분 청산", str(e))
         return None
 
 def execute_full_close(position):
-    """전체 청산"""
     try:
         close_amount = round(position['amount'], 3)
         side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
@@ -452,13 +371,12 @@ def execute_full_close(position):
         
         log(f"✅ 전체 청산 {close_amount:.4f} BTC", "EVENT")
         return order
-    
     except Exception as e:
         log(f"전체 청산 실패: {e}", "ERROR")
+        send_order_failed_alert("전체 청산", str(e))
         return None
 
 def get_current_price():
-    """현재 가격 조회"""
     try:
         ticker = client.futures_symbol_ticker(symbol=SYMBOL)
         return float(ticker['price'])
@@ -466,7 +384,6 @@ def get_current_price():
         return None
 
 def calculate_profit(position, current_price):
-    """현재 수익률 계산"""
     entry_price = position['entry_price']
     signal_type = position['type']
     
@@ -481,7 +398,6 @@ def calculate_profit(position, current_price):
     return profit
 
 def get_current_candle():
-    """현재 봉 정보 가져오기"""
     try:
         klines = client.futures_klines(symbol=SYMBOL, interval=TIMEFRAME, limit=1)
         if klines:
@@ -495,7 +411,6 @@ def get_current_candle():
         return None
 
 def calculate_max_profit_in_candle(position, candle):
-    """현재 봉에서 도달 가능한 최대 수익률"""
     if candle is None:
         return 0
     
@@ -513,7 +428,7 @@ def calculate_max_profit_in_candle(position, candle):
     return max_profit
 
 # ============================================================================
-# 메인 봇 로직 - 🔧 로그 간소화
+# 메인 봇 로직 - 🔧 보유기간 체크 완전 수정
 # ============================================================================
 
 def main():
@@ -521,7 +436,7 @@ def main():
     log("🤖 RSI Divergence 자동매매 봇 시작", "EVENT")
     log(f"심볼: {SYMBOL} | 타임프레임: {TIMEFRAME} | 레버리지: {LEVERAGE}배")
     log(f"포지션 크기: {POSITION_SIZE} BTC | 최대: {MAX_POSITIONS}개")
-    log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% | 보유: {HOLD_BARS}봉")
+    log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% | 보유: {HOLD_BARS}봉 (약 {HOLD_BARS*15/60:.1f}시간)")
     log(f"스탑로스: Bear {STOP_LOSS_BEAR}% / Bull {STOP_LOSS_BULL}%")
     log("="*80, "EVENT")
     
@@ -533,16 +448,16 @@ def main():
         try:
             current_time = datetime.now()
             
-            # 🔧 신호 체크 여부
+            # 신호 체크
             minutes_since_last_check = (current_time - last_signal_check_time).total_seconds() / 60
             should_check_signals = minutes_since_last_check >= 15
             
             if should_check_signals:
-                # 신호 체크 시작
                 df = get_historical_data(SYMBOL, TIMEFRAME, limit=CANDLES_TO_LOAD)
                 
                 if df is None:
-                    log("데이터 로드 실패, 재시도...", "ERROR")
+                    log("데이터 로드 실패", "ERROR")
+                    send_error_alert("데이터 로드", "바이낸스 API 응답 없음")
                     time.sleep(60)
                     continue
                 
@@ -555,9 +470,6 @@ def main():
                     log(f"데이터 부족: {len(df)}/{required_candles}", "ERROR")
                     time.sleep(60)
                     continue
-                
-                current_price = df['close'].iloc[-1]
-                current_rsi = df['rsi'].iloc[-1]
                 
                 # 신호 감지
                 if len(active_positions) < MAX_POSITIONS:
@@ -574,16 +486,18 @@ def main():
                             
                             if position:
                                 position_id = get_next_position_id()
-                                stop_order_id = set_stop_loss(position)
                                 
                                 position['position_id'] = position_id
-                                position['stop_order_id'] = stop_order_id
+                                position['stop_order_id'] = None
                                 position['partial_closed'] = False
                                 position['signal_index'] = signal_index
                                 position['initial_amount'] = POSITION_SIZE
                                 
                                 active_positions[position_id] = position
                                 entered_signals.add(signal_index)
+                                
+                                log(f"ID={position_id} 진입시간: {position['entry_time'].strftime('%H:%M:%S')}", "DEBUG")
+                                log(f"ID={position_id} 청산예정: {(position['entry_time'] + timedelta(minutes=HOLD_BARS*15)).strftime('%H:%M:%S')}", "DEBUG")
                                 
                                 if len(active_positions) >= MAX_POSITIONS:
                                     break
@@ -592,7 +506,7 @@ def main():
                 
                 last_signal_check_time = current_time
             
-            # 포지션 관리
+            # 🔧 포지션 관리
             for pos_id in list(active_positions.keys()):
                 position = active_positions[pos_id]
                 
@@ -603,18 +517,23 @@ def main():
                 current_price = current_candle['close']
                 profit = calculate_profit(position, current_price)
                 
-                # 스탑로스 체크
+                # 🔧 보유 시간 계산 (분 단위)
+                time_held = datetime.now() - position['entry_time']
+                minutes_held = time_held.total_seconds() / 60
+                bars_held = minutes_held / 15  # float 유지
+                
+                # 1️⃣ 스탑로스 체크
                 stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
                 
                 if profit <= -stop_loss_pct:
-                    log(f"🚨 포지션 ID={pos_id} 스탑로스! {profit:.2f}%", "EVENT")
+                    log(f"🚨 ID={pos_id} 스탑로스! {profit:.2f}%", "EVENT")
                     
                     result = execute_full_close(position)
                     
                     if result:
                         final_price = get_current_price()
                         final_profit = calculate_profit(position, final_price)
-                        send_stop_loss_alert(position)
+                        send_exit_alert(position, "스탑로스", final_profit)
                         del active_positions[pos_id]
                         if 'signal_index' in position:
                             entered_signals.discard(position['signal_index'])
@@ -623,13 +542,9 @@ def main():
                 
                 max_profit_in_candle = calculate_max_profit_in_candle(position, current_candle)
                 
-                time_held = datetime.now() - position['entry_time']
-                minutes_held = time_held.total_seconds() / 60
-                bars_held = int(minutes_held / 15)
-                
-                # 부분 익절 체크
+                # 2️⃣ 부분 익절 체크
                 if not position['partial_closed'] and max_profit_in_candle >= PARTIAL_PROFIT_TARGET:
-                    log(f"🎯 포지션 ID={pos_id} 부분 익절 {max_profit_in_candle:.2f}%", "EVENT")
+                    log(f"🎯 ID={pos_id} 부분 익절 {max_profit_in_candle:.2f}%", "EVENT")
                     
                     result = execute_partial_close(position, PARTIAL_PROFIT_RATIO)
                     
@@ -637,23 +552,25 @@ def main():
                         closed_amount = position['amount'] * PARTIAL_PROFIT_RATIO
                         position['amount'] = position['amount'] - closed_amount
                         position['partial_closed'] = True
-                        send_partial_close_alert(position, max_profit_in_candle)
+                        send_exit_alert(position, "부분 익절", max_profit_in_candle)
                 
-                # 보유기간 도달 체크
-                if bars_held >= HOLD_BARS:
-                    log(f"⏰ 포지션 ID={pos_id} {HOLD_BARS}봉 도달, 청산", "EVENT")
+                # 3️⃣ 보유기간 도달 체크 (🔧 분 단위로 체크)
+                target_minutes = HOLD_BARS * 15
+                
+                if minutes_held >= target_minutes:
+                    log(f"⏰ ID={pos_id} {HOLD_BARS}봉({target_minutes}분) 도달 (실제: {minutes_held:.1f}분)", "EVENT")
                     
                     result = execute_full_close(position)
                     
                     if result:
                         final_price = get_current_price()
                         final_profit = calculate_profit(position, final_price)
-                        send_final_close_alert(position, final_profit, final_price)
+                        send_exit_alert(position, "보유기간 종료", final_profit)
                         del active_positions[pos_id]
                         if 'signal_index' in position:
                             entered_signals.discard(position['signal_index'])
             
-            # 🔧 간소화된 1분 로그
+            # 간소화된 로그
             next_signal_check = 15 - int(minutes_since_last_check)
             pos_summary = ""
             if active_positions:
@@ -661,7 +578,8 @@ def main():
                     candle = get_current_candle()
                     if candle:
                         p = calculate_profit(pos, candle['close'])
-                        pos_summary += f" | P{pos_id}: {p:+.2f}%"
+                        mins = (datetime.now() - pos['entry_time']).total_seconds() / 60
+                        pos_summary += f" | P{pos_id}: {p:+.2f}% ({mins:.0f}/{HOLD_BARS*15}분)"
             
             current_price = get_current_price() or 0
             df_temp = get_historical_data(SYMBOL, TIMEFRAME, limit=50)
@@ -671,19 +589,20 @@ def main():
             else:
                 current_rsi = 0
             
-            log(f"✓ BTC ${current_price:,.0f} | RSI {current_rsi:.1f} | "
-                f"포지션 {len(active_positions)}개{pos_summary} | 신호체크 {next_signal_check}분후")
+            log(f"✓ ${current_price:,.0f} | RSI {current_rsi:.1f} | "
+                f"{len(active_positions)}개{pos_summary} | 신호 {next_signal_check}분")
             
             time.sleep(60)
             
         except KeyboardInterrupt:
-            log("\n🛑 봇 종료 (사용자 중단)", "EVENT")
+            log("\n🛑 봇 종료", "EVENT")
             break
-            
         except Exception as e:
             import traceback
-            log(f"오류 발생: {e}", "ERROR")
-            log(f"상세:\n{traceback.format_exc()}")
+            error_msg = str(e)
+            log(f"오류: {error_msg}", "ERROR")
+            log(f"{traceback.format_exc()}")
+            send_error_alert("시스템 오류", error_msg)
             time.sleep(60)
 
 if __name__ == "__main__":

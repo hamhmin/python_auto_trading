@@ -1,0 +1,37 @@
+{
+    # ============================================================================
+# 설정값
+# ============================================================================
+
+SYMBOL = "BTCUSDT"
+TIMEFRAME = "15m"
+LEVERAGE = 30
+POSITION_SIZE = 0.002  # BTC 수량
+
+# 전략 파라미터
+RSI_PERIOD = 14
+LOOKBACK_LEFT = 5
+LOOKBACK_RIGHT = 1
+RANGE_LOWER = 5
+RANGE_UPPER = 60
+
+# 청산 설정
+HOLD_BARS = 38  # 15봉 = 225분 = 3.75시간
+PARTIAL_PROFIT_TARGET = 0.4  # 0.4% 도달 시
+PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
+
+# 포지션 관리
+MAX_POSITIONS = 3  # 최대 동시 포지션 수
+
+# 리스크 관리
+STOP_LOSS_BEAR = 2.1  # Bearish 스탑로스 (%)
+STOP_LOSS_BULL = 2.1  # Bullish 스탑로스 (%)
+
+# 데이터 설정
+CANDLES_TO_LOAD = 300  # RSI 계산 후 dropna를 고려하여 여유있게 설정
+
+},
+
+{
+
+}

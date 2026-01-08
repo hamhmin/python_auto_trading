@@ -17,11 +17,11 @@ client = Client(os.getenv('API_KEY'), os.getenv('SECRET_KEY'))
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"
 RSI_PERIOD = 14
-LOOKBACK_LEFT = 10
-LOOKBACK_RIGHT = 3
+LOOKBACK_LEFT = 2
+LOOKBACK_RIGHT = 5
 RANGE_LOWER = 5
 RANGE_UPPER = 60
-TRADE_DURATION = 25
+TRADE_DURATION = 38
 
 # ============================================================================
 # 핵심 로직 함수

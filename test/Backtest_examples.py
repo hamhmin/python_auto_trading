@@ -6,23 +6,24 @@ import pandas as pd
 
 # 예시 1: 기본 설정으로 백테스팅
 print("="*100)
-print("예시 1: 기본 설정 (lookback_right=4, 부분익절=0.4%, 보유=15봉)")
+print("예시 1: 기본 설정 (lookback_left=2,lookback_right=5, 부분익절=0.8%, 보유=38봉)")
 print("="*100)
 
 backtester1 = RSIDivergenceBacktester(
-    lookback_right=4,
+    lookback_left=2,
+    lookback_right=5,
     partial_profit_target=0.8,
-    hold_bars=5,
-    trading_fee=0
+    hold_bars=38,
+    trading_fee=0.05
 )
 
-backtester1.load_data('btc_15m_data.json')
+backtester1.load_data('./test/btc_15m_data.json')
 backtester1.run_backtest()
 backtester1.print_results()
 
 # 예시 2: lookback_right를 2로 변경
 print("\n\n" + "="*100)
-print("예시 2: lookback_right=4로 변경 (신호 지연 증가)")
+print("예시 2:")
 print("="*100)
 
 backtester2 = RSIDivergenceBacktester(
@@ -32,13 +33,13 @@ backtester2 = RSIDivergenceBacktester(
     trading_fee=0
 )
 
-backtester2.load_data('btc_15m_data.json')
+backtester2.load_data('./test/btc_15m_data.json')
 backtester2.run_backtest()
 backtester2.print_results()
 
 # 예시 3: 부분익절 목표를 0.6%로 상향
 print("\n\n" + "="*100)
-print("예시 3: 부분익절 목표를 0.6%로 상향")
+print("예시 3: ")
 print("="*100)
 
 backtester3 = RSIDivergenceBacktester(
@@ -54,7 +55,7 @@ backtester3.print_results()
 
 # 예시 4: 포지션 보유 기간을 20봉으로 연장
 print("\n\n" + "="*100)
-print("예시 4: 포지션 보유 기간을 20봉으로 연장")
+print("예시 4: ")
 print("="*100)
 
 backtester4 = RSIDivergenceBacktester(
