@@ -223,12 +223,15 @@ def process_all_combos_nb(close, high, low, bear_sigs, bull_sigs, pp_arr, hb_arr
                 sum_losses = 0.0
                 min_pnl = pnls[0]
                 max_profit_val = max_profits[0]
+                max_loss_val = max_losses[0]  # 🔥 추가!
                 sum_max_loss = 0.0
+                sum_max_profit = 0.0  # 🔥 추가!
                 
                 for i in range(n_trades):
                     pnl = pnls[i]
                     sum_pnl += pnl
                     sum_max_loss += max_losses[i]
+                    sum_max_profit += max_profits[i]  # 🔥 추가!
                     
                     if pnl > 0:
                         n_wins += 1
@@ -241,11 +244,15 @@ def process_all_combos_nb(close, high, low, bear_sigs, bull_sigs, pp_arr, hb_arr
                     
                     if max_profits[i] > max_profit_val:
                         max_profit_val = max_profits[i]
+                    
+                    # 🔥 max_loss 최소값(최악) 찾기
+                    if max_losses[i] < max_loss_val:
+                        max_loss_val = max_losses[i]
                 
                 n_losses = n_trades - n_wins
                 
-                # 결과 저장 (14개 → max_concurrent 추가)
-                result = np.zeros(14)
+                # 결과 저장 (16개: sum_max_profit 추가)
+                result = np.zeros(16)
                 result[0] = pp_idx
                 result[1] = hb_idx
                 result[2] = sl_idx
@@ -259,7 +266,9 @@ def process_all_combos_nb(close, high, low, bear_sigs, bull_sigs, pp_arr, hb_arr
                 result[10] = sum_max_loss
                 result[11] = max_profit_val
                 result[12] = sl_count
-                result[13] = max_concurrent  # 🔥 추가!
+                result[13] = max_concurrent
+                result[14] = max_loss_val  # 🔥 실제 최악의 max_loss
+                result[15] = sum_max_profit  # 🔥 추가!
                 
                 results.append(result)
     
@@ -298,7 +307,9 @@ def process_batch_ultra(batch_data, close, high, low, rsi, pp_arr, hb_arr, sl_ar
         sum_max_loss = r[10]
         max_profit_val = r[11]
         sl_count = int(r[12])
-        max_concurrent = int(r[13])  # 🔥 추가!
+        max_concurrent = int(r[13])
+        max_loss_val = r[14]  # 🔥 실제 최악의 max_loss
+        sum_max_profit = r[15]  # 🔥 추가!
         
         pp = pp_arr[pp_idx]
         hb = hb_arr[hb_idx]
@@ -313,6 +324,7 @@ def process_batch_ultra(batch_data, close, high, low, rsi, pp_arr, hb_arr, sl_ar
         avg_win = sum_wins / n_wins if n_wins > 0 else 0
         avg_loss = sum_losses / n_losses if n_losses > 0 else 0
         avg_max_loss = sum_max_loss / n_trades
+        avg_max_profit = sum_max_profit / n_trades  # 🔥 추가!
         stop_loss_rate = (sl_count / n_trades) * 100
         
         # 🔥 추가 지표 계산
@@ -331,18 +343,20 @@ def process_batch_ultra(batch_data, close, high, low, rsi, pp_arr, hb_arr, sl_ar
         
         # 3. 통합 최강 전략 점수 (Ultimate Rank)
         # = ((승률 * 평균익절) + ((1-승률) * 평균손실)) / abs(최대손실)
-        if min_pnl != 0:
+        if max_loss_val != 0:
             expected_return = (win_rate_decimal * avg_win) + ((1 - win_rate_decimal) * avg_loss)
-            ultimate_rank = expected_return / abs(min_pnl)
+            ultimate_rank = expected_return / abs(max_loss_val)  # 🔥 수정! max_loss_val 사용
         else:
             ultimate_rank = 0.0
-
-        # 최대 레버리지/최대 분할 => 지수 
-        # 최대 레버리지 = 100 / abs(min_pnl)
-        # 최대 분할 = max_concurrent
-        # pnl = total_pnl
-        leverage_calc = total_pnl / max_concurrent * 100 / abs(min_pnl)
-
+        
+        # 4. 최대 레버리지 + 분할 = PNL 지수
+        # = total_pnl / max_concurrent * 100 / abs(max_loss_val)
+        if max_concurrent > 0 and max_loss_val != 0:
+            leverage_calc = total_pnl / max_concurrent * 100 / abs(max_loss_val)
+        else:
+            leverage_calc = 0.0
+        #손익비
+        loss_profit_per = (avg_win + avg_loss) * win_rate / 100
 
         batch_results.append({
             'lookback_left': ll,
@@ -359,16 +373,19 @@ def process_batch_ultra(batch_data, close, high, low, rsi, pp_arr, hb_arr, sl_ar
             'avg_pnl': round(avg_pnl, 4),
             'avg_win': round(avg_win, 4),
             'avg_loss': round(avg_loss, 4),
-            'max_loss': round(min_pnl, 4),
+            'max_loss': round(max_loss_val, 4),  # 🔥 수정! 실제 최악의 손실 폭
+            'worst_trade_pnl': round(min_pnl, 4),  # 🔥 추가! 최악의 거래 총수익
             'avg_max_loss': round(avg_max_loss, 4),
+            'avg_max_profit': round(avg_max_profit, 4),  # 🔥 추가!
             'max_profit': round(max_profit_val, 4),
             'stop_loss_count': sl_count,
             'stop_loss_rate': round(stop_loss_rate, 2),
-            'max_concurrent_positions': max_concurrent,  # 🔥 실제 계산값!
+            'max_concurrent_positions': max_concurrent,
             'kelly_criterion': round(kelly_criterion, 4),
             'expectancy_score': round(expectancy_score, 4),
             'ultimate_rank': round(ultimate_rank, 4),
-            'max lvg+분할=pnl': round(leverage_calc, 4),
+            'max_lvg+분할=pnl': round(leverage_calc, 4),  # 🔥 추가!
+            '손익비': round(loss_profit_per, 4)  # 🔥 추가!
         })
     
     return batch_results
@@ -496,9 +513,9 @@ def main():
         
         # TOP 10
         print("="*100)
-        print("🏆 TOP 10 (수익 조합만)")
+        print("🏆 TOP 1 (수익 조합만)")
         print("="*100)
-        print(positive_results.head(10).to_string(index=False))
+        print(positive_results.head(1).to_string(index=False))
         
         # 최고 결과
         best = positive_results.iloc[0]
@@ -530,6 +547,19 @@ def main():
         print(f"   → ll={best_ultimate['lookback_left']}, lr={best_ultimate['lookback_right']}, "
               f"pp={best_ultimate['partial_profit']}, hb={best_ultimate['hold_bars']}, sl={best_ultimate['stop_loss']}")
         print(f"   → 총수익: {best_ultimate['total_pnl']:+.2f}%, 승률: {best_ultimate['win_rate']:.1f}%")
+
+        best_lvg_pnl = positive_results.nlargest(1, 'max_lvg+분할=pnl').iloc[0]
+        print(f"\n   최대 레버리지+분할 적용 pnl: {best_lvg_pnl['ultimate_rank']:.4f}")
+        print(f"   → ll={best_lvg_pnl['lookback_left']}, lr={best_lvg_pnl['lookback_right']}, "
+              f"pp={best_lvg_pnl['partial_profit']}, hb={best_lvg_pnl['hold_bars']}, sl={best_lvg_pnl['stop_loss']}")
+        print(f"   → 총수익: {best_lvg_pnl['total_pnl']:+.2f}%, 승률: {best_lvg_pnl['win_rate']:.1f}%")
+
+        best_pnl_ratio = positive_results.nlargest(1, '손익비').iloc[0]
+        print(f"\n   손익비: {best_pnl_ratio['ultimate_rank']:.4f}")
+        print(f"   → ll={best_pnl_ratio['lookback_left']}, lr={best_pnl_ratio['lookback_right']}, "
+              f"pp={best_pnl_ratio['partial_profit']}, hb={best_pnl_ratio['hold_bars']}, sl={best_pnl_ratio['stop_loss']}")
+        print(f"   → 총수익: {best_pnl_ratio['total_pnl']:+.2f}%, 승률: {best_pnl_ratio['win_rate']:.1f}%")
+
     else:
         print("\n❌ 결과 없음")
 
