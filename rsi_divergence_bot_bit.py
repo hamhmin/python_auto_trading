@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import pandas as pd
 import numpy as np
@@ -15,6 +16,105 @@ client = Client(os.getenv('API_KEY'), os.getenv('SECRET_KEY'))
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
+
+# ============================================================================
+# 로그 시스템
+# ============================================================================
+
+# 로그 디렉토리
+LOG_DIR = "bot_logs"
+
+# 봇 시작 시간
+BOT_START_TIME = datetime.now()
+LOG_FILENAME = BOT_START_TIME.strftime("bot_log_%Y%m%d_%H%M%S.json")
+LOG_FILEPATH = os.path.join(LOG_DIR, LOG_FILENAME)
+
+# 로그 데이터
+LOG_DATA = {
+    "bot_start_time": BOT_START_TIME.strftime("%Y-%m-%d %H:%M:%S"),
+    "logs": []
+}
+
+def init_log_system():
+    """로그 시스템 초기화"""
+    global LOG_DATA
+    
+    if not os.path.exists(LOG_DIR):
+        os.makedirs(LOG_DIR)
+        print(f"📁 로그 디렉토리 생성: {LOG_DIR}")
+    
+    LOG_DATA["symbol"] = SYMBOL
+    LOG_DATA["leverage"] = LEVERAGE
+    LOG_DATA["stop_loss_bear"] = STOP_LOSS_BEAR
+    LOG_DATA["stop_loss_bull"] = STOP_LOSS_BULL
+    
+    print(f"📝 로그 파일: {LOG_FILEPATH}")
+
+def save_log_to_file():
+    """로그를 파일에 저장"""
+    try:
+        with open(LOG_FILEPATH, 'w', encoding='utf-8') as f:
+            json.dump(LOG_DATA, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ 로그 저장 실패: {e}")
+
+def add_log_entry(message, level="INFO", log_type="TERMINAL"):
+    """로그 항목 추가"""
+    entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3],
+        "level": level,
+        "type": log_type,
+        "message": message
+    }
+    
+    LOG_DATA["logs"].append(entry)
+    
+    # 100개마다 저장
+    if len(LOG_DATA["logs"]) % 100 == 0:
+        save_log_to_file()
+
+def cleanup_old_logs(days=30):
+    """오래된 로그 삭제"""
+    import glob
+    from datetime import timedelta
+    
+    try:
+        cutoff = datetime.now() - timedelta(days=days)
+        
+        for log_file in glob.glob(f"{LOG_DIR}/bot_log_*.json"):
+            try:
+                filename = os.path.basename(log_file)
+                date_str = filename.replace('bot_log_', '').replace('.json', '')
+                file_date = datetime.strptime(date_str, "%Y%m%d_%H%M%S")
+                
+                if file_date < cutoff:
+                    os.remove(log_file)
+                    print(f"🗑️ 오래된 로그 삭제: {filename}")
+            except:
+                pass
+    except Exception as e:
+        print(f"⚠️ 로그 정리 실패: {e}")
+
+def finalize_log():
+    """봇 종료 시 통계 추가"""
+    global LOG_DATA
+    
+    total_logs = len(LOG_DATA["logs"])
+    telegram_count = sum(1 for log in LOG_DATA["logs"] if log["type"] == "TELEGRAM")
+    error_count = sum(1 for log in LOG_DATA["logs"] if log["level"] == "ERROR")
+    event_count = sum(1 for log in LOG_DATA["logs"] if log["level"] == "EVENT")
+    
+    LOG_DATA["statistics"] = {
+        "total_logs": total_logs,
+        "telegram_messages": telegram_count,
+        "errors": error_count,
+        "events": event_count,
+        "bot_end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    
+    save_log_to_file()
+
+
 POSITION_COUNTER = 0
 
 def get_next_position_id():
@@ -26,10 +126,13 @@ def get_next_position_id():
 # 설정값
 # ============================================================================
 
+# 포지션 영속성
+POSITIONS_FILE = "positions_data.json"
+
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"
 LEVERAGE = 30
-POSITION_SIZE = 0.002  # BTC 수량
+POSITION_SIZE = 0.004  # BTC 수량
 
 # 전략 파라미터
 RSI_PERIOD = 14
@@ -44,11 +147,11 @@ PARTIAL_PROFIT_TARGET = 0.8  # 0.4% 도달 시
 PARTIAL_PROFIT_RATIO = 0.5  # 50% 청산
 
 # 포지션 관리
-MAX_POSITIONS = 5  # 최대 동시 포지션 수
+MAX_POSITIONS = 10  # 최대 동시 포지션 수
 
 # 리스크 관리
-STOP_LOSS_BEAR = 7.4  # Bearish 스탑로스 (%)
-STOP_LOSS_BULL = 7.4  # Bullish 스탑로스 (%)
+STOP_LOSS_BEAR = 3  # Bearish 스탑로스 (%)
+STOP_LOSS_BULL = 3  # Bullish 스탑로스 (%)
 
 # 데이터 설정
 CANDLES_TO_LOAD = 300  # RSI 계산 후 dropna를 고려하여 여유있게 설정
@@ -68,82 +171,257 @@ def send_telegram_message(message):
     except:
         return False
 
+def send_divergence_alert(div_type, pivot_idx, rsi_prev, rsi_curr, price_prev, price_curr):
+    """다이버전스 발견 시 알림"""
+    emoji = "🔴" if div_type == "bearish" else "🟢"
+    type_kr = "하락(BEARISH)" if div_type == "bearish" else "상승(BULLISH)"
+    
+    message = f"""
+{emoji} <b>다이버전스 발견!</b>
+
+📊 {type_kr} 다이버전스
+📈 RSI: {rsi_prev:.1f} → {rsi_curr:.1f}
+💰 가격: ${price_prev:,.0f} → ${price_curr:,.0f}
+📍 피봇 인덱스: {pivot_idx}
+⏰ {datetime.now().strftime('%H:%M:%S')}
+
+🎯 포지션 진입 예정...
+"""
+    send_telegram_message(message)
+
+
+def send_error_alert(error_type, error_message, context=""):
+    """에러 발생 시 텔레그램 알림"""
+    msg = f"⚠️ 봇 에러!\n\n🚨 {error_type}\n💬 {error_message}"
+    if context:
+        msg += f"\n📍 {context}"
+    msg += f"\n⏰ {datetime.now().strftime('%H:%M:%S')}"
+    send_telegram_message(msg)
+
+
 def send_entry_alert(position):
+    """포지션 진입 알림 (상세)"""
     emoji = "🔴" if position['type'] == "bearish" else "🟢"
     type_kr = "숏(SHORT)" if position['type'] == "bearish" else "롱(LONG)"
+    
+    position_value = position['entry_price'] * position['amount']
+    
+    # 스탑로스 가격 계산
+    stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
+    if position['type'] == 'bearish':
+        stop_price = position['entry_price'] * (1 + stop_loss_pct / 100)
+    else:
+        stop_price = position['entry_price'] * (1 - stop_loss_pct / 100)
+    
+    # 부분익절 가격 계산
+    if position['type'] == 'bearish':
+        partial_price = position['entry_price'] * (1 - PARTIAL_PROFIT_TARGET / 100)
+    else:
+        partial_price = position['entry_price'] * (1 + PARTIAL_PROFIT_TARGET / 100)
+    
     expected_close = position['entry_time'] + timedelta(minutes=HOLD_BARS*15)
+    hold_hours = HOLD_BARS * 15 / 60
+    
     message = f"""
-{emoji} <b>포지션 진입!</b>
+{emoji} <b>포지션 진입! #{position.get('position_id', '?')}</b>
 
-📊 {type_kr}
-💰 ${position['entry_price']:,.2f}
+📊 {SYMBOL} {type_kr}
+💰 진입가: ${position['entry_price']:,.2f}
+📦 수량: {position['amount']:.4f} BTC
+💵 포지션 크기: ${position_value:,.2f}
+
+🛡️ 스탑로스: ${stop_price:,.0f} (-{stop_loss_pct}%)
+🎯 부분익절: ${partial_price:,.0f} (+{PARTIAL_PROFIT_TARGET}%)
+⏰ 보유기간: {HOLD_BARS}봉 ({hold_hours:.1f}시간)
+
 ⏰ {position['entry_time'].strftime('%H:%M:%S')}
-🎯 예상 청산: {expected_close.strftime('%H:%M:%S')} ({HOLD_BARS}봉)
 """
     send_telegram_message(message)
+    
+    # 터미널 로그
+    log("="*80, "EVENT")
+    log(f"{emoji} 포지션 진입! ID={position.get('position_id', '?')}", "EVENT")
+    log("="*80, "EVENT")
+    log(f"📊 심볼: {SYMBOL} | 방향: {type_kr} | 레버리지: {LEVERAGE}배", "INFO")
+    log(f"💰 진입가: ${position['entry_price']:,.2f} | 수량: {position['amount']:.4f} BTC | 포지션 크기: ${position_value:,.2f}", "INFO")
+    log(f"🛡️ 스탑로스: ${stop_price:,.2f} (-{stop_loss_pct}%) | 🎯 부분익절: ${partial_price:,.2f} (+{PARTIAL_PROFIT_TARGET}%)", "INFO")
+    log(f"⏰ 예상 청산: {expected_close.strftime('%Y-%m-%d %H:%M:%S')} ({HOLD_BARS}봉, {hold_hours:.1f}시간)", "INFO")
+    if 'stop_order_id' in position:
+        log(f"📋 스탑로스 주문 ID: {position['stop_order_id']}", "DEBUG")
+    log("="*80, "EVENT")
+
 
 def send_exit_alert(position, reason, final_profit):
+    """포지션 청산 알림 (상세)"""
     emoji = "🎉" if final_profit > 0 else "😢"
+    if "스탑로스" in reason:
+        emoji = "🚨"
+    elif "보유기간" in reason:
+        emoji = "⏰"
+    
+    type_kr = "숏(SHORT)" if position['type'] == 'bearish' else "롱(LONG)"
+    
     time_held = datetime.now() - position['entry_time']
     hours = time_held.total_seconds() / 3600
+    
+    # 현재가 추정
+    current_price = position['entry_price'] * (1 + final_profit / 100) if position['type'] == 'bullish' else position['entry_price'] * (1 - final_profit / 100)
+    
+    closed_amount = position['amount']
+    closed_value = current_price * closed_amount
+    
+    # 실현 손익
+    if position['type'] == 'bearish':
+        realized_pnl = (position['entry_price'] - current_price) * closed_amount
+    else:
+        realized_pnl = (current_price - position['entry_price']) * closed_amount
+    
     message = f"""
-{emoji} <b>{reason}</b>
+{emoji} <b>{reason}! #{position.get('position_id', '?')}</b>
 
-📊 {'숏' if position['type'] == 'bearish' else '롱'}
-💰 ${position['entry_price']:,.2f}
-📈 수익: {final_profit:+.2f}%
+📊 {SYMBOL} {type_kr}
+💰 진입가: ${position['entry_price']:,.2f}
+📈 청산가: ${current_price:,.2f}
+📦 청산 수량: {closed_amount:.4f} BTC
+💵 청산 금액: ${closed_value:,.2f}
+
+📊 수익률: {final_profit:+.2f}%
+💵 실현 손익: ${realized_pnl:+.2f}
 ⏱️ 보유: {hours:.1f}시간
+
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 """
+    
+    # 스탑로스인 경우 추가 정보
+    if "스탑로스" in reason:
+        stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
+        if position['type'] == 'bearish':
+            expected_stop = position['entry_price'] * (1 + stop_loss_pct / 100)
+            liquidation_price = position['entry_price'] * (1 + 100 / LEVERAGE / 100)
+        else:
+            expected_stop = position['entry_price'] * (1 - stop_loss_pct / 100)
+            liquidation_price = position['entry_price'] * (1 - 100 / LEVERAGE / 100)
+        
+        message += f"""
+⚠️ 청산 원인: {reason}
+🛡️ 스탑로스가: ${expected_stop:,.0f}
+💀 강제청산가: ${liquidation_price:,.0f}
+"""
+    
     send_telegram_message(message)
+    
+    # 터미널 로그
+    log("="*80, "EVENT")
+    log(f"{emoji} {reason}! ID={position.get('position_id', '?')}", "EVENT")
+    log("="*80, "EVENT")
+    log(f"📊 {SYMBOL} {type_kr} | 진입가: ${position['entry_price']:,.2f}", "INFO")
+    log(f"📈 청산가: ${current_price:,.2f} | 수익: {final_profit:+.2f}%", "INFO")
+    log(f"📦 청산: {closed_amount:.4f} BTC | 금액: ${closed_value:,.2f}", "INFO")
+    log(f"💵 실현 손익: ${realized_pnl:+.2f} | ⏱️ 보유: {hours:.1f}시간", "INFO")
+    log("="*80, "EVENT")
 
-def send_error_alert(error_type, error_message):
-    """에러 알림"""
+
+def send_bot_end_alert(reason=""):
+    """봇 종료 알림"""
     message = f"""
-🚨 <b>에러 발생!</b>
+🔄 <b>봇 종료</b>
 
-⚠️ 타입: {error_type}
-📋 내용: {error_message}
 ⏰ {datetime.now().strftime('%H:%M:%S')}
-
-🔄 60초 후 재시도합니다
 """
     send_telegram_message(message)
 
-def send_order_failed_alert(order_type, reason, details=""):
-    """주문 실패 알림"""
+# ============================================================================
+# 바이낸스 스탑로스 주문
+# ============================================================================
+
+def place_stop_loss_order(position):
+    """바이낸스에 스탑로스 주문 등록"""
+    try:
+        stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
+        
+        if position['type'] == 'bearish':
+            # SHORT: 진입가보다 높은 가격에 스탑로스
+            stop_price = round(position['entry_price'] * (1 + stop_loss_pct / 100), 1)
+            side = SIDE_BUY
+            position_side = 'SHORT'
+        else:
+            # LONG: 진입가보다 낮은 가격에 스탑로스
+            stop_price = round(position['entry_price'] * (1 - stop_loss_pct / 100), 1)
+            side = SIDE_SELL
+            position_side = 'LONG'
+        
+        # 스탑 마켓 주문
+        order = client.futures_create_order(
+            symbol=SYMBOL,
+            side=side,
+            type='STOP_MARKET',
+            stopPrice=stop_price,
+            quantity=position['amount'],
+            positionSide=position_side
+        )
+        
+        log(f"✅ 스탑로스 주문 등록: ${stop_price:,.0f} (주문ID: {order['orderId']})", "INFO")
+        return order['orderId']
+        
+    except BinanceAPIException as e:
+        msg = f"[{e.code}] {e.message}"
+        log(f"스탑로스 주문 실패: {msg}", "ERROR")
+        send_error_alert("스탑로스 주문 실패", msg, "place_stop_loss_order")
+        return None
+    except Exception as e:
+        log(f"스탑로스 주문 오류: {e}", "ERROR")
+        return None
+
+def cancel_stop_loss_order(stop_order_id):
+    """스탑로스 주문 취소"""
+    if not stop_order_id:
+        return
+    
+    try:
+        client.futures_cancel_order(
+            symbol=SYMBOL,
+            orderId=stop_order_id
+        )
+        log(f"스탑로스 주문 취소: {stop_order_id}", "DEBUG")
+    except Exception as e:
+        log(f"스탑로스 주문 취소 실패: {e}", "DEBUG")
+
+def check_stop_loss_filled(position):
+    """스탑로스 주문 체결 확인"""
+    if not position.get('stop_order_id'):
+        return None
+    
+    try:
+        order = client.futures_get_order(
+            symbol=SYMBOL,
+            orderId=position['stop_order_id']
+        )
+        
+        if order['status'] == 'FILLED':
+            return {
+                'filled': True,
+                'avg_price': float(order['avgPrice']),
+                'reason': '스탑로스 주문 체결'
+            }
+        elif order['status'] in ['NEW', 'PARTIALLY_FILLED']:
+            return {'filled': False}
+        else:
+            # CANCELED, EXPIRED 등
+            return {'filled': False, 'canceled': True}
+            
+    except Exception as e:
+        log(f"주문 상태 조회 실패: {e}", "ERROR")
+        return None
+
+
+def send_bot_start_alert(reason=""):
+    """봇 시작 알림"""
     message = f"""
-❌ <b>주문 실패!</b>
-
-📊 타입: {order_type}
-❗ 사유: {reason}
-{f'📝 상세: {details}' if details else ''}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-    send_telegram_message(message)
-
-def send_balance_insufficient_alert(required_amount):
-    """잔고 부족 알림"""
-    message = f"""
-⚠️ <b>잔고 부족!</b>
-
-💰 필요 수량: {required_amount} BTC
-🔍 거래소에서 잔고를 확인하세요
+🔄 <b>봇 시작</b>
 
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 """
     send_telegram_message(message)
-
-def send_bot_restart_alert(reason=""):
-    """봇 재시작 알림"""
-    message = f"""
-🔄 <b>봇 재시작</b>
-
-{f'📋 사유: {reason}' if reason else ''}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-    send_telegram_message(message)
-
 # ============================================================================
 # 유틸리티
 # ============================================================================
@@ -214,23 +492,38 @@ def detect_regular_divergence(df):
     rsi = df['rsi']
     high = df['high']
     low = df['low']
-    check_idx = len(df) - LOOKBACK_RIGHT - 1
+    check_idx = len(df) - LOOKBACK_RIGHT - 2  # 진행중 캔들 제외
+    
+    # 🔥 디버깅 로그
+    log(f"[신호체크] check_idx={check_idx}, len(df)={len(df)}, RSI={rsi.iloc[check_idx]:.1f}", "INFO")
     
     if check_idx < LOOKBACK_LEFT:
+        log(f"[신호체크] check_idx < LOOKBACK_LEFT - 데이터 부족", "DEBUG")
         return signals
     
     # Bearish
-    if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx):
+    is_pivot_high = find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx)
+    log(f"[신호체크] Bearish 피벗 체크: {is_pivot_high}", "DEBUG")
+    
+    if is_pivot_high:
+        log(f"[신호체크] ✅ RSI 피벗 고점 발견! 이전 피벗 검색 중...", "DEBUG")
+        
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
+                log(f"[신호체크] ✅ 이전 피벗 발견! idx={j}", "DEBUG")
+                
                 signal_idx = check_idx + LOOKBACK_RIGHT
-                if signal_idx < len(df):
-                    rsi_curr = rsi.iloc[check_idx]
-                    rsi_prev = rsi.iloc[j]
-                    price_curr = high.iloc[check_idx]
-                    price_prev = high.iloc[j]
-                    
-                    if rsi_curr < rsi_prev and price_curr > price_prev:
+                
+                rsi_curr = rsi.iloc[check_idx]
+                rsi_prev = rsi.iloc[j]
+                price_curr = high.iloc[check_idx]
+                price_prev = high.iloc[j]
+                
+                log(f"[신호체크] RSI: {rsi_prev:.1f}→{rsi_curr:.1f} (하락:{rsi_curr < rsi_prev})", "DEBUG")
+                log(f"[신호체크] 가격: ${price_prev:.0f}→${price_curr:.0f} (상승:{price_curr > price_prev})", "DEBUG")
+                
+                if rsi_curr < rsi_prev and price_curr > price_prev:
+                    if signal_idx < len(df):
                         signals.append({
                             'type': 'bearish',
                             'index': signal_idx,
@@ -238,20 +531,35 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🔴 Bearish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        send_divergence_alert('bearish', check_idx, rsi_prev, rsi_curr, price_prev, price_curr)
+                    else:
+                        log(f"⚠️ Bearish Divergence 감지! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        log(f"   진입 시점(idx={signal_idx})이 데이터 범위({len(df)}) 밖 - 다음 체크 시 진입", "DEBUG")
                 break
     
     # Bullish
-    if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx):
+    is_pivot_low = find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, check_idx)
+    log(f"[신호체크] Bullish 피벗 체크: {is_pivot_low}", "DEBUG")
+    
+    if is_pivot_low:
+        log(f"[신호체크] ✅ RSI 피벗 저점 발견! 이전 피벗 검색 중...", "DEBUG")
+        
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
+                log(f"[신호체크] ✅ 이전 피벗 발견! idx={j}", "DEBUG")
+                
                 signal_idx = check_idx + LOOKBACK_RIGHT
-                if signal_idx < len(df):
-                    rsi_curr = rsi.iloc[check_idx]
-                    rsi_prev = rsi.iloc[j]
-                    price_curr = low.iloc[check_idx]
-                    price_prev = low.iloc[j]
-                    
-                    if rsi_curr > rsi_prev and price_curr < price_prev:
+                
+                rsi_curr = rsi.iloc[check_idx]
+                rsi_prev = rsi.iloc[j]
+                price_curr = low.iloc[check_idx]
+                price_prev = low.iloc[j]
+                
+                log(f"[신호체크] RSI: {rsi_prev:.1f}→{rsi_curr:.1f} (상승:{rsi_curr > rsi_prev})", "DEBUG")
+                log(f"[신호체크] 가격: ${price_prev:.0f}→${price_curr:.0f} (하락:{price_curr < price_prev})", "DEBUG")
+                
+                if rsi_curr > rsi_prev and price_curr < price_prev:
+                    if signal_idx < len(df):
                         signals.append({
                             'type': 'bullish',
                             'index': signal_idx,
@@ -259,8 +567,13 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🟢 Bullish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        send_divergence_alert('bullish', check_idx, rsi_prev, rsi_curr, price_prev, price_curr)
+                    else:
+                        log(f"⚠️ Bullish Divergence 감지! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        log(f"   진입 시점(idx={signal_idx})이 데이터 범위({len(df)}) 밖 - 다음 체크 시 진입", "DEBUG")
                 break
     
+    log(f"[신호체크] ✅ 감지된 신호: {len(signals)}개", "INFO")
     return signals
 
 # ============================================================================
@@ -275,13 +588,21 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
             pass
         
         client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
-        side = SIDE_SELL if signal_type == 'bearish' else SIDE_BUY
+        
+        # 양방향 포지션 모드 지원
+        if signal_type == 'bearish':
+            side = SIDE_SELL
+            position_side = 'SHORT'
+        else:
+            side = SIDE_BUY
+            position_side = 'LONG'
         
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type=ORDER_TYPE_MARKET,
-            quantity=amount
+            quantity=amount,
+            positionSide=position_side
         )
         
         entry_price = 0.0
@@ -317,63 +638,87 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
             'entry_time': datetime.now()
         }
         
+        # 스탑로스 주문 등록
+        stop_order_id = place_stop_loss_order(position)
+        position['stop_order_id'] = stop_order_id
+        
         send_entry_alert(position)
         return position
     
     except BinanceAPIException as e:
         if e.code == -2019:
             log(f"잔고 부족! 필요: {amount} BTC", "ERROR")
-            send_balance_insufficient_alert(amount)
         elif e.code == -4131:
             log(f"Reduce-only 거부", "ERROR")
-            send_order_failed_alert("진입", "Reduce-only 거부", "포지션이 없는 상태에서 reduceOnly 주문 시도")
         else:
             log(f"바이낸스 API 에러 [{e.code}]: {e.message}", "ERROR")
-            send_order_failed_alert("진입", f"API 에러 [{e.code}]", e.message)
+        return None
+    except BinanceAPIException as e:
+        msg = f"[{e.code}] {e.message}"
+        log(f"API 에러: {msg}", "ERROR")
+        send_error_alert("API 에러", msg, "진입")
         return None
     except Exception as e:
-        log(f"진입 주문 실패: {e}", "ERROR")
-        send_error_alert("진입 주문", str(e))
+        log(f"진입 실패: {e}", "ERROR")
+        send_error_alert("진입 실패", str(e), "execute_entry")
         return None
 
 def execute_partial_close(position, ratio=0.5):
     try:
         close_amount = round(position['amount'] * ratio, 3)
-        side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
+        
+        # 양방향 모드: 포지션 타입에 따라 청산 방향 결정
+        if position['type'] == 'bearish':
+            side = SIDE_BUY  # SHORT 청산은 BUY
+            position_side = 'SHORT'
+        else:
+            side = SIDE_SELL  # LONG 청산은 SELL
+            position_side = 'LONG'
         
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type=ORDER_TYPE_MARKET,
             quantity=close_amount,
-            reduceOnly=True
+            positionSide=position_side
         )
         
         log(f"✅ 부분 익절 {close_amount:.4f} BTC", "EVENT")
         return order
+    except BinanceAPIException as e:
+        msg = f"[{e.code}] {e.message}"
+        log(f"API 에러: {msg}", "ERROR")
+        send_error_alert("API 에러", msg, "부분청산")
+        return None
     except Exception as e:
-        log(f"부분 청산 실패: {e}", "ERROR")
-        send_order_failed_alert("부분 청산", str(e))
+        log(f"부분청산 실패: {e}", "ERROR")
+        send_error_alert("부분청산 실패", str(e), "execute_partial_close")
         return None
 
 def execute_full_close(position):
     try:
         close_amount = round(position['amount'], 3)
-        side = SIDE_BUY if position['side'] == SIDE_SELL else SIDE_SELL
+        
+        # 양방향 모드: 포지션 타입에 따라 청산 방향 결정
+        if position['type'] == 'bearish':
+            side = SIDE_BUY  # SHORT 청산은 BUY
+            position_side = 'SHORT'
+        else:
+            side = SIDE_SELL  # LONG 청산은 SELL
+            position_side = 'LONG'
         
         order = client.futures_create_order(
             symbol=SYMBOL,
             side=side,
             type=ORDER_TYPE_MARKET,
             quantity=close_amount,
-            reduceOnly=True
+            positionSide=position_side
         )
         
         log(f"✅ 전체 청산 {close_amount:.4f} BTC", "EVENT")
         return order
     except Exception as e:
         log(f"전체 청산 실패: {e}", "ERROR")
-        send_order_failed_alert("전체 청산", str(e))
         return None
 
 def get_current_price():
@@ -431,6 +776,87 @@ def calculate_max_profit_in_candle(position, candle):
 # 메인 봇 로직 - 🔧 보유기간 체크 완전 수정
 # ============================================================================
 
+
+# ============================================================================
+# 포지션 영속성
+# ============================================================================
+
+def save_positions(active_positions, entered_signals):
+    """포지션 데이터를 JSON 파일로 저장"""
+    try:
+        positions_to_save = {}
+        for pos_id, pos in active_positions.items():
+            pos_copy = pos.copy()
+            if isinstance(pos_copy.get('entry_time'), datetime):
+                pos_copy['entry_time'] = pos_copy['entry_time'].isoformat()
+            if 'side' in pos_copy:
+                pos_copy['side'] = str(pos_copy['side'])
+            positions_to_save[str(pos_id)] = pos_copy
+        
+        data = {
+            "active_positions": positions_to_save,
+            "entered_signals": list(entered_signals),
+            "last_updated": datetime.now().isoformat(),
+            "position_counter": POSITION_COUNTER
+        }
+        
+        with open(POSITIONS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        
+        log(f"💾 저장: {len(active_positions)}개 포지션", "DEBUG")
+        return True
+    except Exception as e:
+        log(f"저장 실패: {e}", "ERROR")
+        return False
+
+def load_positions():
+    """JSON에서 포지션 로드"""
+    global POSITION_COUNTER
+    
+    try:
+        if not os.path.exists(POSITIONS_FILE):
+            log("💾 저장된 포지션 없음", "INFO")
+            return {}, set()
+        
+        with open(POSITIONS_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        active_positions = {}
+        for pos_id, pos in data.get("active_positions", {}).items():
+            pos_copy = pos.copy()
+            if 'entry_time' in pos_copy:
+                try:
+                    pos_copy['entry_time'] = datetime.fromisoformat(pos_copy['entry_time'])
+                except:
+                    pos_copy['entry_time'] = datetime.now()
+            if 'side' in pos_copy:
+                if 'SELL' in str(pos_copy['side']):
+                    pos_copy['side'] = SIDE_SELL
+                else:
+                    pos_copy['side'] = SIDE_BUY
+            active_positions[int(pos_id)] = pos_copy
+        
+        entered_signals = set(data.get("entered_signals", []))
+        
+        if "position_counter" in data:
+            POSITION_COUNTER = data["position_counter"]
+        
+        log(f"💾 로드: {len(active_positions)}개 포지션", "INFO")
+        
+        if active_positions:
+            log("="*60, "INFO")
+            for pos_id, pos in active_positions.items():
+                elapsed = (datetime.now() - pos['entry_time']).total_seconds() / 60
+                log(f"  #{pos_id}: {pos['type']} ${pos['entry_price']:.0f} "
+                    f"{pos['amount']:.4f}BTC ({elapsed:.0f}분)", "INFO")
+            log("="*60, "INFO")
+        
+        return active_positions, entered_signals
+    except Exception as e:
+        log(f"로드 실패: {e}", "ERROR")
+        return {}, set()
+
+
 def main():
     log("="*80, "EVENT")
     log("🤖 RSI Divergence 자동매매 봇 시작", "EVENT")
@@ -439,9 +865,10 @@ def main():
     log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% | 보유: {HOLD_BARS}봉 (약 {HOLD_BARS*15/60:.1f}시간)")
     log(f"스탑로스: Bear {STOP_LOSS_BEAR}% / Bull {STOP_LOSS_BULL}%")
     log("="*80, "EVENT")
+    send_bot_start_alert()
     
-    active_positions = {}
-    entered_signals = set()
+    # 포지션 로드
+    active_positions, entered_signals = load_positions()
     last_signal_check_time = datetime.now()
     
     while True:
@@ -457,7 +884,6 @@ def main():
                 
                 if df is None:
                     log("데이터 로드 실패", "ERROR")
-                    send_error_alert("데이터 로드", "바이낸스 API 응답 없음")
                     time.sleep(60)
                     continue
                 
@@ -495,6 +921,7 @@ def main():
                                 
                                 active_positions[position_id] = position
                                 entered_signals.add(signal_index)
+                                save_positions(active_positions, entered_signals)
                                 
                                 log(f"ID={position_id} 진입시간: {position['entry_time'].strftime('%H:%M:%S')}", "DEBUG")
                                 log(f"ID={position_id} 청산예정: {(position['entry_time'] + timedelta(minutes=HOLD_BARS*15)).strftime('%H:%M:%S')}", "DEBUG")
@@ -522,21 +949,20 @@ def main():
                 minutes_held = time_held.total_seconds() / 60
                 bars_held = minutes_held / 15  # float 유지
                 
-                # 1️⃣ 스탑로스 체크
-                stop_loss_pct = STOP_LOSS_BEAR if position['type'] == 'bearish' else STOP_LOSS_BULL
+                # 1️⃣ 스탑로스 체결 확인
+                stop_result = check_stop_loss_filled(position)
                 
-                if profit <= -stop_loss_pct:
-                    log(f"🚨 ID={pos_id} 스탑로스! {profit:.2f}%", "EVENT")
+                if stop_result and stop_result.get('filled'):
+                    log(f"🚨 ID={pos_id} 스탑로스 체결!", "EVENT")
                     
-                    result = execute_full_close(position)
+                    avg_price = stop_result['avg_price']
+                    final_profit = calculate_profit(position, avg_price)
+                    send_exit_alert(position, "스탑로스", final_profit)
                     
-                    if result:
-                        final_price = get_current_price()
-                        final_profit = calculate_profit(position, final_price)
-                        send_exit_alert(position, "스탑로스", final_profit)
-                        del active_positions[pos_id]
-                        if 'signal_index' in position:
-                            entered_signals.discard(position['signal_index'])
+                    del active_positions[pos_id]
+                    if 'signal_index' in position:
+                        entered_signals.discard(position['signal_index'])
+                    save_positions(active_positions, entered_signals)
                     
                     continue
                 
@@ -550,8 +976,18 @@ def main():
                     
                     if result:
                         closed_amount = position['amount'] * PARTIAL_PROFIT_RATIO
+                        # 기존 스탑로스 취소
+                        cancel_stop_loss_order(position.get('stop_order_id'))
+                        
+                        # 남은 수량 업데이트
                         position['amount'] = position['amount'] - closed_amount
                         position['partial_closed'] = True
+                        
+                        # 새 스탑로스 주문
+                        new_stop_order_id = place_stop_loss_order(position)
+                        position['stop_order_id'] = new_stop_order_id
+                        
+                        save_positions(active_positions, entered_signals)
                         send_exit_alert(position, "부분 익절", max_profit_in_candle)
                 
                 # 3️⃣ 보유기간 도달 체크 (🔧 분 단위로 체크)
@@ -559,6 +995,9 @@ def main():
                 
                 if minutes_held >= target_minutes:
                     log(f"⏰ ID={pos_id} {HOLD_BARS}봉({target_minutes}분) 도달 (실제: {minutes_held:.1f}분)", "EVENT")
+                    
+                    # 스탑로스 주문 취소
+                    cancel_stop_loss_order(position.get('stop_order_id'))
                     
                     result = execute_full_close(position)
                     
@@ -569,6 +1008,7 @@ def main():
                         del active_positions[pos_id]
                         if 'signal_index' in position:
                             entered_signals.discard(position['signal_index'])
+                        save_positions(active_positions, entered_signals)
             
             # 간소화된 로그
             next_signal_check = 15 - int(minutes_since_last_check)
@@ -596,13 +1036,12 @@ def main():
             
         except KeyboardInterrupt:
             log("\n🛑 봇 종료", "EVENT")
+            send_bot_end_alert()
             break
         except Exception as e:
             import traceback
-            error_msg = str(e)
-            log(f"오류: {error_msg}", "ERROR")
+            log(f"오류: {e}", "ERROR")
             log(f"{traceback.format_exc()}")
-            send_error_alert("시스템 오류", error_msg)
             time.sleep(60)
 
 if __name__ == "__main__":

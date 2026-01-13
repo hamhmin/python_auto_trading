@@ -97,53 +97,22 @@ def send_exit_alert(position, reason, final_profit):
 """
     send_telegram_message(message)
 
-def send_error_alert(error_type, error_message):
-    """에러 알림"""
+def send_bot_end_alert(reason=""):
+    """봇 종료 알림"""
     message = f"""
-🚨 <b>에러 발생!</b>
-
-⚠️ 타입: {error_type}
-📋 내용: {error_message}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-
-🔄 60초 후 재시도합니다
-"""
-    send_telegram_message(message)
-
-def send_order_failed_alert(order_type, reason, details=""):
-    """주문 실패 알림"""
-    message = f"""
-❌ <b>주문 실패!</b>
-
-📊 타입: {order_type}
-❗ 사유: {reason}
-{f'📝 상세: {details}' if details else ''}
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-    send_telegram_message(message)
-
-def send_balance_insufficient_alert(required_amount):
-    """잔고 부족 알림"""
-    message = f"""
-⚠️ <b>잔고 부족!</b>
-
-💰 필요 수량: {required_amount} BTC
-🔍 거래소에서 잔고를 확인하세요
+🔄 <b>봇 종료</b>
 
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 """
     send_telegram_message(message)
-
-def send_bot_restart_alert(reason=""):
-    """봇 재시작 알림"""
+def send_bot_start_alert(reason=""):
+    """봇 시작 알림"""
     message = f"""
-🔄 <b>봇 재시작</b>
+🔄 <b>봇 시작</b>
 
-{f'📋 사유: {reason}' if reason else ''}
 ⏰ {datetime.now().strftime('%H:%M:%S')}
 """
     send_telegram_message(message)
-
 # ============================================================================
 # 유틸리티
 # ============================================================================
@@ -224,13 +193,14 @@ def detect_regular_divergence(df):
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_high(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
                 signal_idx = check_idx + LOOKBACK_RIGHT
-                if signal_idx < len(df):
-                    rsi_curr = rsi.iloc[check_idx]
-                    rsi_prev = rsi.iloc[j]
-                    price_curr = high.iloc[check_idx]
-                    price_prev = high.iloc[j]
-                    
-                    if rsi_curr < rsi_prev and price_curr > price_prev:
+                
+                rsi_curr = rsi.iloc[check_idx]
+                rsi_prev = rsi.iloc[j]
+                price_curr = high.iloc[check_idx]
+                price_prev = high.iloc[j]
+                
+                if rsi_curr < rsi_prev and price_curr > price_prev:
+                    if signal_idx < len(df):
                         signals.append({
                             'type': 'bearish',
                             'index': signal_idx,
@@ -238,6 +208,9 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🔴 Bearish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                    else:
+                        log(f"⚠️ Bearish Divergence 감지! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        log(f"   진입 시점(idx={signal_idx})이 데이터 범위({len(df)}) 밖 - 다음 체크 시 진입", "DEBUG")
                 break
     
     # Bullish
@@ -245,13 +218,14 @@ def detect_regular_divergence(df):
         for j in range(check_idx - RANGE_LOWER, max(check_idx - RANGE_UPPER, LOOKBACK_LEFT), -1):
             if find_pivot_low(rsi, LOOKBACK_LEFT, LOOKBACK_RIGHT, j):
                 signal_idx = check_idx + LOOKBACK_RIGHT
-                if signal_idx < len(df):
-                    rsi_curr = rsi.iloc[check_idx]
-                    rsi_prev = rsi.iloc[j]
-                    price_curr = low.iloc[check_idx]
-                    price_prev = low.iloc[j]
-                    
-                    if rsi_curr > rsi_prev and price_curr < price_prev:
+                
+                rsi_curr = rsi.iloc[check_idx]
+                rsi_prev = rsi.iloc[j]
+                price_curr = low.iloc[check_idx]
+                price_prev = low.iloc[j]
+                
+                if rsi_curr > rsi_prev and price_curr < price_prev:
+                    if signal_idx < len(df):
                         signals.append({
                             'type': 'bullish',
                             'index': signal_idx,
@@ -259,6 +233,9 @@ def detect_regular_divergence(df):
                             'time': df['open_time'].iloc[signal_idx]
                         })
                         log(f"🟢 Bullish Divergence! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                    else:
+                        log(f"⚠️ Bullish Divergence 감지! RSI: {rsi_prev:.1f}→{rsi_curr:.1f}", "EVENT")
+                        log(f"   진입 시점(idx={signal_idx})이 데이터 범위({len(df)}) 밖 - 다음 체크 시 진입", "DEBUG")
                 break
     
     return signals
@@ -323,17 +300,13 @@ def execute_entry(signal_type, amount=POSITION_SIZE):
     except BinanceAPIException as e:
         if e.code == -2019:
             log(f"잔고 부족! 필요: {amount} BTC", "ERROR")
-            send_balance_insufficient_alert(amount)
         elif e.code == -4131:
             log(f"Reduce-only 거부", "ERROR")
-            send_order_failed_alert("진입", "Reduce-only 거부", "포지션이 없는 상태에서 reduceOnly 주문 시도")
         else:
             log(f"바이낸스 API 에러 [{e.code}]: {e.message}", "ERROR")
-            send_order_failed_alert("진입", f"API 에러 [{e.code}]", e.message)
         return None
     except Exception as e:
         log(f"진입 주문 실패: {e}", "ERROR")
-        send_error_alert("진입 주문", str(e))
         return None
 
 def execute_partial_close(position, ratio=0.5):
@@ -353,7 +326,6 @@ def execute_partial_close(position, ratio=0.5):
         return order
     except Exception as e:
         log(f"부분 청산 실패: {e}", "ERROR")
-        send_order_failed_alert("부분 청산", str(e))
         return None
 
 def execute_full_close(position):
@@ -373,7 +345,6 @@ def execute_full_close(position):
         return order
     except Exception as e:
         log(f"전체 청산 실패: {e}", "ERROR")
-        send_order_failed_alert("전체 청산", str(e))
         return None
 
 def get_current_price():
@@ -439,6 +410,7 @@ def main():
     log(f"부분 익절: {PARTIAL_PROFIT_TARGET}% | 보유: {HOLD_BARS}봉 (약 {HOLD_BARS*15/60:.1f}시간)")
     log(f"스탑로스: Bear {STOP_LOSS_BEAR}% / Bull {STOP_LOSS_BULL}%")
     log("="*80, "EVENT")
+    send_bot_start_alert()
     
     active_positions = {}
     entered_signals = set()
@@ -457,7 +429,6 @@ def main():
                 
                 if df is None:
                     log("데이터 로드 실패", "ERROR")
-                    send_error_alert("데이터 로드", "바이낸스 API 응답 없음")
                     time.sleep(60)
                     continue
                 
@@ -596,13 +567,12 @@ def main():
             
         except KeyboardInterrupt:
             log("\n🛑 봇 종료", "EVENT")
+            send_bot_end_alert()
             break
         except Exception as e:
             import traceback
-            error_msg = str(e)
-            log(f"오류: {error_msg}", "ERROR")
+            log(f"오류: {e}", "ERROR")
             log(f"{traceback.format_exc()}")
-            send_error_alert("시스템 오류", error_msg)
             time.sleep(60)
 
 if __name__ == "__main__":
