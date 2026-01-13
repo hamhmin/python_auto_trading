@@ -217,10 +217,27 @@ def simulate_trade(df, divergence):
         final_price = df['close'].iloc[exit_idx]
         result['exit_price'] = final_price
         
-        if div_type == 'bearish':
-            result['final_profit_pct'] = ((entry_price - final_price) / entry_price) * 100
+        # 🔥 수정: 부분익절 반영
+        if result['partial_profit_hit']:
+            # 부분익절 수익 (50% 포지션)
+            partial_pnl = PARTIAL_PROFIT_TARGET * 0.5
+            
+            # 남은 50% 포지션 수익
+            if div_type == 'bearish':
+                exit_profit = ((entry_price - final_price) / entry_price) * 100
+            else:
+                exit_profit = ((final_price - entry_price) / entry_price) * 100
+            
+            remaining_pnl = exit_profit * 0.5
+            
+            # 총 수익
+            result['final_profit_pct'] = partial_pnl + remaining_pnl
         else:
-            result['final_profit_pct'] = ((final_price - entry_price) / entry_price) * 100
+            # 부분익절 없음 - 100% 포지션
+            if div_type == 'bearish':
+                result['final_profit_pct'] = ((entry_price - final_price) / entry_price) * 100
+            else:
+                result['final_profit_pct'] = ((final_price - entry_price) / entry_price) * 100
     
     result['max_profit_pct'] = max_profit
     result['max_loss_pct'] = max_loss
