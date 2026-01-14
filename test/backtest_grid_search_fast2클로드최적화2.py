@@ -549,17 +549,23 @@ def main():
         print(f"   → 총수익: {best_ultimate['total_pnl']:+.2f}%, 승률: {best_ultimate['win_rate']:.1f}%")
 
         best_lvg_pnl = positive_results.nlargest(1, 'max_lvg+분할=pnl').iloc[0]
-        print(f"\n   최대 레버리지+분할 적용 pnl: {best_lvg_pnl['ultimate_rank']:.4f}")
+        print(f"\n   최대 레버리지+분할 적용 pnl: {best_lvg_pnl['max_lvg+분할=pnl']:.4f}")
         print(f"   → ll={best_lvg_pnl['lookback_left']}, lr={best_lvg_pnl['lookback_right']}, "
               f"pp={best_lvg_pnl['partial_profit']}, hb={best_lvg_pnl['hold_bars']}, sl={best_lvg_pnl['stop_loss']}")
         print(f"   → 총수익: {best_lvg_pnl['total_pnl']:+.2f}%, 승률: {best_lvg_pnl['win_rate']:.1f}%")
 
         best_pnl_ratio = positive_results.nlargest(1, '손익비').iloc[0]
-        print(f"\n   손익비: {best_pnl_ratio['ultimate_rank']:.4f}")
+        print(f"\n   손익비: {best_pnl_ratio['손익비']:.4f}")
         print(f"   → ll={best_pnl_ratio['lookback_left']}, lr={best_pnl_ratio['lookback_right']}, "
               f"pp={best_pnl_ratio['partial_profit']}, hb={best_pnl_ratio['hold_bars']}, sl={best_pnl_ratio['stop_loss']}")
         print(f"   → 총수익: {best_pnl_ratio['total_pnl']:+.2f}%, 승률: {best_pnl_ratio['win_rate']:.1f}%")
+        best_pnl_ratio = positive_results.nlargest(1, '손익비').iloc[0]
 
+        best_avg_pnl = positive_results.nlargest(1, 'avg_pnl').iloc[0]
+        print(f"\n   avg_pnl: {best_avg_pnl['avg_pnl']:.4f}")
+        print(f"   → ll={best_avg_pnl['lookback_left']}, lr={best_avg_pnl['lookback_right']}, "
+              f"pp={best_avg_pnl['partial_profit']}, hb={best_avg_pnl['hold_bars']}, sl={best_avg_pnl['stop_loss']}")
+        print(f"   → 총수익: {best_avg_pnl['total_pnl']:+.2f}%, 승률: {best_avg_pnl['win_rate']:.1f}%")
     else:
         print("\n❌ 결과 없음")
 

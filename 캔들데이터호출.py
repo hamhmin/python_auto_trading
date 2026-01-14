@@ -3,7 +3,7 @@ import json
 import time
 from datetime import datetime
 
-def get_binance_futures_json(symbol="BTCUSDT", interval="15m", total_calls=1):
+def get_binance_futures_json(symbol="BTCUSDT", interval="15m", total_calls=24):
     url = "https://fapi.binance.com/fapi/v1/klines"
     limit = 1500
     all_formatted_data = []
